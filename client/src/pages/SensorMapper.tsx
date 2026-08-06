@@ -43,7 +43,7 @@ function createAnnotationMarker(scene: THREE.Scene, worldPos: THREE.Vector3, end
   group.add(line);
 
   // 光圈（环形）
-  const ringGeo = new THREE.RingGeometry(0.12, 0.16, 32);
+  const ringGeo = new THREE.RingGeometry(0.20, 0.28, 32);
   const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
   const ring = new THREE.Mesh(ringGeo, ringMat);
   ring.position.copy(endPos);
@@ -51,7 +51,7 @@ function createAnnotationMarker(scene: THREE.Scene, worldPos: THREE.Vector3, end
   group.add(ring);
 
   // 外圈脉冲环
-  const pulseGeo = new THREE.RingGeometry(0.18, 0.20, 32);
+  const pulseGeo = new THREE.RingGeometry(0.30, 0.35, 32);
   const pulseMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
   const pulse = new THREE.Mesh(pulseGeo, pulseMat);
   pulse.position.copy(endPos);
@@ -60,7 +60,7 @@ function createAnnotationMarker(scene: THREE.Scene, worldPos: THREE.Vector3, end
   group.add(pulse);
 
   // 中心点（可点击的球体）
-  const dotGeo = new THREE.SphereGeometry(0.08, 16, 16);
+  const dotGeo = new THREE.SphereGeometry(0.4, 16, 16);
   const dotMat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
   const dot = new THREE.Mesh(dotGeo, dotMat);
   dot.position.copy(endPos);
