@@ -19,16 +19,16 @@ const BODY_BOUNDS: Record<string, {xMin:number, xMax:number, yMin:number, yMax:n
 
 // 部位标注点配置：3D 位置（归一化）、摄像机目标视角
 const BODY_ANNOTATIONS: Record<string, {
-  pos: [number, number, number],   // 标注点在模型表面的位置（归一化 0~1）
-  labelOffset: [number, number, number], // 引导线末端偏移
-  camera: { pos: [number, number, number], target: [number, number, number] }, // 摄像机飞行目标
+  pos: [number, number, number],
+  labelOffset: [number, number, number],
+  camera: { pos: [number, number, number], target: [number, number, number] },
   label: string
 }> = {
-  back:   { pos: [0.5, 0.65, -0.3], labelOffset: [1.5, 0.8, -1.0], camera: { pos: [0, 1, -6], target: [0, 1, 0] }, label: '背部' },
-  chest:  { pos: [0.5, 0.65, 0.3],  labelOffset: [1.5, 0.8, 1.0],  camera: { pos: [0, 1, 6], target: [0, 1, 0] }, label: '胸部' },
-  arm:    { pos: [0.15, 0.6, 0.0],  labelOffset: [-1.5, 1.0, 0.5], camera: { pos: [-5, 1.5, 3], target: [-1, 1, 0] }, label: '手臂' },
-  leg:    { pos: [0.4, 0.25, 0.2],  labelOffset: [1.2, -0.5, 1.5], camera: { pos: [2, -1, 5], target: [0, -1, 0] }, label: '腿部' },
-  palm:   { pos: [0.85, 0.45, 0.1], labelOffset: [1.8, 0.3, 0.8],  camera: { pos: [4, 0.5, 3], target: [2, 0, 0] }, label: '手掌' },
+  back:   { pos: [0.5, 0.70, 0.0],  labelOffset: [0, 0, -0.8],  camera: { pos: [0, 3, -8], target: [0, 3, 0] }, label: '背部' },
+  chest:  { pos: [0.5, 0.70, 1.0],  labelOffset: [0, 0, 0.8],   camera: { pos: [0, 3, 8], target: [0, 3, 0] }, label: '胸部' },
+  arm:    { pos: [0.10, 0.55, 0.5], labelOffset: [-0.8, 0, 0],  camera: { pos: [-7, 3, 2], target: [-1, 3, 0] }, label: '手臂' },
+  leg:    { pos: [0.5, 0.20, 0.7],  labelOffset: [0.8, 0, 0.5], camera: { pos: [3, -1, 7], target: [0, 0, 0] }, label: '腿部' },
+  palm:   { pos: [0.90, 0.40, 0.5], labelOffset: [0.8, 0, 0],   camera: { pos: [7, 2, 3], target: [2, 1, 0] }, label: '手掌' },
 };
 
 
@@ -337,6 +337,24 @@ export default function SensorMapper() {
       const dy = e.clientY - pointerDownPos.current.y;
       if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return;
     }
+    // 标注点点击检测（优先于其他操作）
+    if (sceneRef.current.camera) {
+      const container = containerRef.current!;
+      const rect = container.getBoundingClientRect();
+      const mouse2 = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const rc = new THREE.Raycaster();
+      rc.setFromCamera(mouse2, sceneRef.current.camera);
+      const clickables: THREE.Object3D[] = [];
+      annotationGroups.current.forEach((g: any) => g.traverse((c: any) => { if (c.userData?.clickable) clickables.push(c); }));
+      const aHits = rc.intersectObjects(clickables, false);
+      if (aHits.length > 0 && aHits[0].object.userData?.onClick) {
+        aHits[0].object.userData.onClick();
+        return;
+      }
+    }
     // 微调拖拽结束
     if (dragMode && draggedMarker.current) {
       const container = containerRef.current!;
@@ -370,15 +388,6 @@ export default function SensorMapper() {
     );
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, sceneRef.current.camera);
-    // 先检测标注点点击
-    const allAnnotationMeshes: THREE.Object3D[] = [];
-    annotationGroups.current.forEach((g: any) => g.traverse((c: any) => { if (c.userData?.clickable) allAnnotationMeshes.push(c); }));
-    const annotHits = raycaster.intersectObjects(allAnnotationMeshes, false);
-    if (annotHits.length > 0) {
-      const clicked = annotHits[0].object;
-      if (clicked.userData?.onClick) clicked.userData.onClick();
-      return;
-    }
     const hits = raycaster.intersectObject(sceneRef.current.model, true);
     if (hits.length > 0) {
       if (matrixMode) {
