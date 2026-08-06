@@ -1,6 +1,22 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 
+
+// 身体部位包围盒（归一化坐标，基于模型 BBox 的比例）
+// Y: 0=脚底, 1=头顶; X: 0=右侧, 1=左侧
+const BODY_BOUNDS: Record<string, {xMin:number, xMax:number, yMin:number, yMax:number, dir:'front'|'back'|'top'|'left'|'right'}> = {
+  back:   { xMin: 0.30, xMax: 0.70, yMin: 0.45, yMax: 0.85, dir: 'back' },
+  chest:  { xMin: 0.30, xMax: 0.70, yMin: 0.45, yMax: 0.85, dir: 'front' },
+  palm:   { xMin: 0.00, xMax: 1.00, yMin: 0.30, yMax: 0.60, dir: 'front' },
+  arm:    { xMin: 0.05, xMax: 0.30, yMin: 0.45, yMax: 0.80, dir: 'front' },
+  leg:    { xMin: 0.30, xMax: 0.70, yMin: 0.05, yMax: 0.45, dir: 'front' },
+  thumb:  { xMin: 0.00, xMax: 0.20, yMin: 0.35, yMax: 0.55, dir: 'front' },
+  index:  { xMin: 0.00, xMax: 0.20, yMin: 0.35, yMax: 0.55, dir: 'front' },
+  middle: { xMin: 0.00, xMax: 0.20, yMin: 0.35, yMax: 0.55, dir: 'front' },
+  ring:   { xMin: 0.00, xMax: 0.20, yMin: 0.35, yMax: 0.55, dir: 'front' },
+  pinky:  { xMin: 0.00, xMax: 0.20, yMin: 0.35, yMax: 0.55, dir: 'front' },
+};
+
 export default function SensorMapper() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<any>({});
@@ -13,6 +29,8 @@ export default function SensorMapper() {
   const [status, setStatus] = useState('拖拽 GLB 文件到此处加载模型');
   const [symmetry, setSymmetry] = useState<'none'|'x'|'y'|'xz'>('none');
   const [matrixMode, setMatrixMode] = useState(false);
+  const [dragMode, setDragMode] = useState(false);
+  const draggedMarker = useRef<{mesh: THREE.Mesh, idx: number} | null>(null);
   const [matrixRows, setMatrixRows] = useState(8);
   const [matrixCols, setMatrixCols] = useState(8);
   const [matrixSpacing, setMatrixSpacing] = useState(0.5);
@@ -174,13 +192,58 @@ export default function SensorMapper() {
   const pointerDownPos = useRef<{x:number,y:number}|null>(null);
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     pointerDownPos.current = { x: e.clientX, y: e.clientY };
-  }, []);
+    // 微调模式：检测是否点击了已有的 marker
+    if (dragMode && sceneRef.current.markerGroup) {
+      const container = containerRef.current!;
+      const rect = container.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, sceneRef.current.camera);
+      const markers = sceneRef.current.markerGroup.children;
+      const hits = raycaster.intersectObjects(markers, false);
+      if (hits.length > 0) {
+        const mesh = hits[0].object as THREE.Mesh;
+        const idx = markers.indexOf(mesh);
+        draggedMarker.current = { mesh, idx };
+        // 禁用 OrbitControls
+        if (sceneRef.current.controls) sceneRef.current.controls.enabled = false;
+        setStatus('拖拽中... 松开鼠标完成微调');
+      }
+    }
+  }, [dragMode]);
   const onPointerUp = useCallback((e: any) => {
     // 如果是 pointerup 事件，检查是否是拖拽
     if (e.type === 'pointerup' && pointerDownPos.current) {
       const dx = e.clientX - pointerDownPos.current.x;
       const dy = e.clientY - pointerDownPos.current.y;
       if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return;
+    }
+    // 微调拖拽结束
+    if (dragMode && draggedMarker.current) {
+      const container = containerRef.current!;
+      const rect = container.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, sceneRef.current.camera);
+      const hits = raycaster.intersectObject(sceneRef.current.model!, true);
+      if (hits.length > 0) {
+        const newPos = hits[0].point;
+        draggedMarker.current.mesh.position.copy(newPos);
+        // 更新 sensors 数据
+        const idx = draggedMarker.current.idx;
+        setSensors(prev => prev.map((s, i) => i === idx ? { ...s, pos: [newPos.x, newPos.y, newPos.z] as [number,number,number] } : s));
+        sensorsRef.current = sensorsRef.current.map((s, i) => i === idx ? { ...s, pos: [newPos.x, newPos.y, newPos.z] as [number,number,number] } : s);
+        setStatus('微调完成: 点 #' + idx + ' 已移动');
+      }
+      draggedMarker.current = null;
+      if (sceneRef.current.controls) sceneRef.current.controls.enabled = true;
+      return;
     }
     if (mode !== 'click' || !sceneRef.current.model) return;
     const container = containerRef.current!;
@@ -199,7 +262,7 @@ export default function SensorMapper() {
         addSensorMarker(hits[0].point, region);
       }
     }
-  }, [mode, region, matrixMode]);
+  }, [mode, region, matrixMode, dragMode]);
 
   // 添加标注点
   const addSensorMarker = (pos: THREE.Vector3, reg: string, skipSymmetry = false) => {
@@ -221,42 +284,58 @@ export default function SensorMapper() {
     setStatus(`已标注 ${sensorsRef.current.length + 1} 个传感器点 (${reg})`);
   };
 
-  // 区域批量生成
+  // 区域批量生成（按部位限定范围）
   const generateGrid = useCallback(() => {
     if (!sceneRef.current.model) return;
     const model = sceneRef.current.model;
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
     const min = box.min;
-
     const raycaster = new THREE.Raycaster();
     let count = 0;
+
+    // 获取当前部位的包围盒范围
+    const bounds = BODY_BOUNDS[region] || { xMin: 0, xMax: 1, yMin: 0, yMax: 1, dir: 'front' };
+    const dirEl = document.getElementById('rayDir') as HTMLSelectElement;
+    const rayDir = dirEl?.value || bounds.dir;
+
+    // 计算该部位在模型坐标系中的实际范围
+    const xStart = min.x + size.x * bounds.xMin;
+    const xEnd = min.x + size.x * bounds.xMax;
+    const yStart = min.y + size.y * bounds.yMin;
+    const yEnd = min.y + size.y * bounds.yMax;
 
     for (let row = 0; row < gridRows; row++) {
       for (let col = 0; col < gridCols; col++) {
         const u = gridCols > 1 ? col / (gridCols - 1) : 0.5;
         const v = gridRows > 1 ? row / (gridRows - 1) : 0.5;
-        const x = min.x + size.x * u;
-        const y = min.y + size.y * (1 - v);
+        const x = xStart + (xEnd - xStart) * u;
+        const y = yEnd - (yEnd - yStart) * v;  // 从上到下
 
-        // 根据选择的方向射线投射
-        const dirEl = document.getElementById('rayDir') as HTMLSelectElement;
-        const rayDir = dirEl?.value || 'front';
         let origin: THREE.Vector3, direction: THREE.Vector3;
         if (rayDir === 'front') { origin = new THREE.Vector3(x, y, min.z + size.z + 5); direction = new THREE.Vector3(0, 0, -1); }
         else if (rayDir === 'back') { origin = new THREE.Vector3(x, y, min.z - 5); direction = new THREE.Vector3(0, 0, 1); }
         else if (rayDir === 'top') { origin = new THREE.Vector3(x, min.y + size.y + 5, min.z + size.z * u); direction = new THREE.Vector3(0, -1, 0); }
         else if (rayDir === 'left') { origin = new THREE.Vector3(min.x - 5, y, min.z + size.z * u); direction = new THREE.Vector3(1, 0, 0); }
         else { origin = new THREE.Vector3(min.x + size.x + 5, y, min.z + size.z * u); direction = new THREE.Vector3(-1, 0, 0); }
+
         raycaster.set(origin, direction);
         const hits = raycaster.intersectObject(model, true);
         if (hits.length > 0) {
-          addSensorMarker(hits[0].point, region);
+          addSensorMarker(hits[0].point, region, true);
           count++;
+        } else {
+          // 反方向尝试
+          raycaster.set(origin.clone().add(direction.clone().multiplyScalar(size.length() + 10)), direction.clone().negate());
+          const hits2 = raycaster.intersectObject(model, true);
+          if (hits2.length > 0) {
+            addSensorMarker(hits2[0].point, region, true);
+            count++;
+          }
         }
       }
     }
-    setStatus(`批量生成 ${count} 个点 (${region}, ${gridRows}×${gridCols})`);
+    setStatus('批量: ' + count + '/' + (gridRows * gridCols) + ' (' + region + ' ' + gridRows + 'x' + gridCols + ')');
   }, [gridRows, gridCols, region]);
 
   // 矩阵贴敷生成：以点击位置为中心，生成 N×M 矩阵并投射到模型表面
@@ -380,6 +459,10 @@ export default function SensorMapper() {
         <button onClick={() => setMatrixMode(!matrixMode)}
           className={`px-2 py-1 rounded text-xs ${matrixMode ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20'}`}>
           矩阵贴敷
+        </button>
+        <button onClick={() => { setDragMode(!dragMode); if (!dragMode) setMatrixMode(false); }}
+          className={`px-2 py-1 rounded text-xs ${dragMode ? 'bg-orange-600' : 'bg-white/10 hover:bg-white/20'}`}>
+          微调拖拽
         </button>
         {matrixMode && <>
           <input type="number" value={matrixRows} onChange={e => setMatrixRows(+e.target.value)} min={1} max={32}
