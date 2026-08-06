@@ -799,7 +799,7 @@ function GloveVertexPanel() {
 
 
 // ─── 主页面 ──────────────────────────────────────────────────────────────────
-export default function Home() {
+export default function Compare() {
   return (
     <div className="min-h-screen text-slate-200" style={{background:'linear-gradient(160deg,#060a10 0%,#0b1220 60%,#060a10 100%)'}}>
       <header className="border-b border-white/6 sticky top-0 z-20 backdrop-blur-sm" style={{background:'rgba(6,10,16,0.92)'}}>

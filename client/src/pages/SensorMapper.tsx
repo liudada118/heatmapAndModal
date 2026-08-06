@@ -11,6 +11,11 @@ export default function SensorMapper() {
   const [gridCols, setGridCols] = useState(10);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [status, setStatus] = useState('拖拽 GLB 文件到此处加载模型');
+  const [symmetry, setSymmetry] = useState<'none'|'x'|'y'|'xz'>('none');
+  const [matrixMode, setMatrixMode] = useState(false);
+  const [matrixRows, setMatrixRows] = useState(8);
+  const [matrixCols, setMatrixCols] = useState(8);
+  const [matrixSpacing, setMatrixSpacing] = useState(0.5);
   const sensorsRef = useRef(sensors);
   sensorsRef.current = sensors;
 
@@ -170,11 +175,13 @@ export default function SensorMapper() {
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     pointerDownPos.current = { x: e.clientX, y: e.clientY };
   }, []);
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    if (!pointerDownPos.current) return;
-    const dx = e.clientX - pointerDownPos.current.x;
-    const dy = e.clientY - pointerDownPos.current.y;
-    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return; // 拖拽旋转，忽略
+  const onPointerUp = useCallback((e: any) => {
+    // 如果是 pointerup 事件，检查是否是拖拽
+    if (e.type === 'pointerup' && pointerDownPos.current) {
+      const dx = e.clientX - pointerDownPos.current.x;
+      const dy = e.clientY - pointerDownPos.current.y;
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return;
+    }
     if (mode !== 'click' || !sceneRef.current.model) return;
     const container = containerRef.current!;
     const rect = container.getBoundingClientRect();
@@ -186,12 +193,16 @@ export default function SensorMapper() {
     raycaster.setFromCamera(mouse, sceneRef.current.camera);
     const hits = raycaster.intersectObject(sceneRef.current.model, true);
     if (hits.length > 0) {
-      addSensorMarker(hits[0].point, region);
+      if (matrixMode) {
+        generateMatrixRef.current?.(hits[0].point);
+      } else {
+        addSensorMarker(hits[0].point, region);
+      }
     }
-  }, [mode, region]);
+  }, [mode, region, matrixMode]);
 
   // 添加标注点
-  const addSensorMarker = (pos: THREE.Vector3, reg: string) => {
+  const addSensorMarker = (pos: THREE.Vector3, reg: string, skipSymmetry = false) => {
     const { markerGroup } = sceneRef.current;
     const colors: Record<string, number> = {
       palm: 0x00ff00, thumb: 0xff0000, index: 0xffff00,
@@ -247,6 +258,41 @@ export default function SensorMapper() {
     }
     setStatus(`批量生成 ${count} 个点 (${region}, ${gridRows}×${gridCols})`);
   }, [gridRows, gridCols, region]);
+
+  // 矩阵贴敷生成：以点击位置为中心，生成 N×M 矩阵并投射到模型表面
+  const generateMatrix = useCallback((centerPoint: THREE.Vector3) => {
+    if (!sceneRef.current.model) return;
+    const model = sceneRef.current.model;
+    const raycaster = new THREE.Raycaster();
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    let count = 0;
+
+    for (let row = 0; row < matrixRows; row++) {
+      for (let col = 0; col < matrixCols; col++) {
+        const offsetX = (col - (matrixCols - 1) / 2) * matrixSpacing;
+        const offsetY = (row - (matrixRows - 1) / 2) * matrixSpacing;
+        
+        // 在 center 附近偏移
+        const testPoint = centerPoint.clone();
+        testPoint.x += offsetX;
+        testPoint.y -= offsetY;  // Y 轴向下
+        
+        // 从外向内射线投射
+        const dir = center.clone().sub(testPoint).normalize();
+        raycaster.set(testPoint.clone().add(dir.clone().multiplyScalar(-3)), dir);
+        const hits = raycaster.intersectObject(model, true);
+        if (hits.length > 0) {
+          addSensorMarker(hits[0].point, region, true);
+          count++;
+        }
+      }
+    }
+    setStatus(`矩阵生成 ${count} 个点 (${matrixRows}x${matrixCols}, 间距 ${matrixSpacing})`);
+  }, [matrixRows, matrixCols, matrixSpacing, region]);
+  const generateMatrixRef = useRef(generateMatrix);
+  generateMatrixRef.current = generateMatrix;
+
 
   // 导出 JSON
   const exportJSON = useCallback(() => {
@@ -319,6 +365,32 @@ export default function SensorMapper() {
           </button>
         </>}
 
+        <div className="h-4 w-px bg-white/20" />
+        {/* 对称模式 */}
+        <label className="text-xs text-slate-400">对称:</label>
+        <select value={symmetry} onChange={e => setSymmetry(e.target.value as any)}
+          className="bg-white/10 border border-white/20 rounded px-1 py-0.5 text-xs">
+          <option value="none">无</option>
+          <option value="x">左右(X)</option>
+          <option value="y">前后(Z)</option>
+          <option value="xz">四象限</option>
+        </select>
+        <div className="h-4 w-px bg-white/20" />
+        {/* 矩阵模式 */}
+        <button onClick={() => setMatrixMode(!matrixMode)}
+          className={`px-2 py-1 rounded text-xs ${matrixMode ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20'}`}>
+          矩阵贴敷
+        </button>
+        {matrixMode && <>
+          <input type="number" value={matrixRows} onChange={e => setMatrixRows(+e.target.value)} min={1} max={32}
+            className="w-10 bg-white/10 border border-white/20 rounded px-1 py-0.5 text-xs" title="行" />
+          <span className="text-xs text-slate-500">×</span>
+          <input type="number" value={matrixCols} onChange={e => setMatrixCols(+e.target.value)} min={1} max={32}
+            className="w-10 bg-white/10 border border-white/20 rounded px-1 py-0.5 text-xs" title="列" />
+          <label className="text-xs text-slate-400">距:</label>
+          <input type="number" value={matrixSpacing} onChange={e => setMatrixSpacing(+e.target.value)} min={0.1} max={3} step={0.1}
+            className="w-14 bg-white/10 border border-white/20 rounded px-1 py-0.5 text-xs" />
+        </>}
         <div className="flex-1" />
         <span className="text-xs text-slate-400">{sensors.length} 个点</span>
         <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-red-600/80 hover:bg-red-500">清除</button>
