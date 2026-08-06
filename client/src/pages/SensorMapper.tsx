@@ -1057,71 +1057,94 @@ export default function SensorMapper() {
           const modelSize = box.getSize(new THREE.Vector3());
           const modelCenter = box.getCenter(new THREE.Vector3());
 
-          // 收集所有点的 x,y 坐标，计算全局范围
-          const allPts: {x:number, y:number, region:string, row:number, col:number}[] = [];
-          for (const [region, points] of Object.entries(data)) {
-            (points as any[]).forEach(p => {
-              allPts.push({ x: p.x, y: p.y, region, row: p.row, col: p.col });
-            });
-          }
-          const xs = allPts.map(p => p.x);
-          const ys = allPts.map(p => p.y);
-          const xMin = Math.min(...xs), xMax = Math.max(...xs);
-          const yMin = Math.min(...ys), yMax = Math.max(...ys);
-
-          // 部位到模型区域的映射（Y轴高度范围，归一化 0=底部 1=顶部）
-          const REGION_MAP: Record<string, {yRange:[number,number], zSign:number, rayDir:[number,number,number]}> = {
-            '前胸': { yRange: [0.45, 0.85], zSign: 1, rayDir: [0, 0, -1] },
-            '后背': { yRange: [0.45, 0.85], zSign: -1, rayDir: [0, 0, 1] },
-            '右手臂': { yRange: [0.50, 0.75], zSign: 1, rayDir: [1, 0, 0] },
-            '前裤': { yRange: [0.05, 0.45], zSign: 1, rayDir: [0, 0, -1] },
-          };
-
           const raycaster = new THREE.Raycaster();
           const newSensors: any[] = [];
           let hitCount = 0;
+          let totalCount = 0;
 
-          for (const pt of allPts) {
-            const regionCfg = REGION_MAP[pt.region] || { yRange: [0.3, 0.8], zSign: 1, rayDir: [0, 0, -1] };
-            // 归一化坐标到 [0, 1]
-            const nx = (pt.x - xMin) / (xMax - xMin || 1);
-            const ny = (pt.y - yMin) / (yMax - yMin || 1);
+          const regionColors: Record<string, number> = {
+            '前胸': 0x00ff88, '后背': 0xff8800, '右手臂': 0x8800ff, '前裤': 0x00aaff,
+            '左手臂': 0xff00ff, '后裤': 0xffaa00
+          };
 
-            // 映射到模型空间
-            const worldX = modelCenter.x + (nx - 0.5) * modelSize.x * 0.8;
-            const worldY = box.min.y + (regionCfg.yRange[0] + ny * (regionCfg.yRange[1] - regionCfg.yRange[0])) * modelSize.y;
-            const worldZ = modelCenter.z + regionCfg.zSign * modelSize.z * 1.5;
+          for (const [region, points] of Object.entries(data)) {
+            const pts = points as any[];
+            totalCount += pts.length;
 
-            // 射线投射到模型表面
-            const origin = new THREE.Vector3(worldX, worldY, worldZ);
-            const dir = new THREE.Vector3(...regionCfg.rayDir).normalize();
-            raycaster.set(origin, dir);
-            const hits = raycaster.intersectObject(model, true);
+            // 计算该区域自身的坐标范围
+            const rxs = pts.map(p => p.x);
+            const rys = pts.map(p => p.y);
+            const rxMin = Math.min(...rxs), rxMax = Math.max(...rxs);
+            const ryMin = Math.min(...rys), ryMax = Math.max(...rys);
 
-            if (hits.length > 0) {
-              const pos = hits[0].point;
-              // 创建标记球
-              const geo = new THREE.SphereGeometry(0.06, 8, 8);
-              const regionColors: Record<string, number> = {
-                '前胸': 0x00ff88, '后背': 0xff8800, '右手臂': 0x8800ff, '前裤': 0x00aaff
-              };
-              const mat = new THREE.MeshBasicMaterial({ color: regionColors[pt.region] || 0x00ff00 });
-              const mesh = new THREE.Mesh(geo, mat);
-              mesh.position.copy(pos);
-              markerGroup.add(mesh);
-              newSensors.push({
-                pos: [pos.x, pos.y, pos.z],
-                region: pt.region,
-                row: pt.row,
-                col: pt.col,
-                mesh
-              });
-              hitCount++;
+            for (const pt of pts) {
+              // 归一化到 [0,1]（区域内部坐标）
+              const nx = (pt.x - rxMin) / (rxMax - rxMin || 1);
+              const ny = (pt.y - ryMin) / (ryMax - ryMin || 1);
+
+              // 尝试 6 个方向的射线
+              const directions: [THREE.Vector3, THREE.Vector3][] = [
+                // [origin offset from center, ray direction]
+                [new THREE.Vector3(0, 0, modelSize.z), new THREE.Vector3(0, 0, -1)],   // 前→后
+                [new THREE.Vector3(0, 0, -modelSize.z), new THREE.Vector3(0, 0, 1)],   // 后→前
+                [new THREE.Vector3(modelSize.x, 0, 0), new THREE.Vector3(-1, 0, 0)],   // 右→左
+                [new THREE.Vector3(-modelSize.x, 0, 0), new THREE.Vector3(1, 0, 0)],   // 左→右
+                [new THREE.Vector3(0, modelSize.y, 0), new THREE.Vector3(0, -1, 0)],   // 上→下
+                [new THREE.Vector3(0, -modelSize.y, 0), new THREE.Vector3(0, 1, 0)],   // 下→上
+              ];
+
+              // 映射到模型空间（X 用 nx，Y 用 ny）
+              const worldX = box.min.x + nx * modelSize.x;
+              const worldY = box.min.y + ny * modelSize.y;
+
+              let bestHit: THREE.Vector3 | null = null;
+              let bestDist = Infinity;
+
+              for (const [offsetDir, rayDir] of directions) {
+                const origin = new THREE.Vector3(worldX, worldY, modelCenter.z).add(
+                  offsetDir.clone().multiplyScalar(1.5)
+                );
+                // 根据射线方向调整 origin 的对应轴
+                if (Math.abs(rayDir.z) > 0.5) {
+                  origin.x = worldX;
+                  origin.y = worldY;
+                } else if (Math.abs(rayDir.x) > 0.5) {
+                  origin.y = worldY;
+                  origin.z = modelCenter.z + (nx - 0.5) * modelSize.z;
+                } else {
+                  origin.x = worldX;
+                  origin.z = modelCenter.z + (nx - 0.5) * modelSize.z;
+                }
+
+                raycaster.set(origin, rayDir);
+                const hits = raycaster.intersectObject(model, true);
+                if (hits.length > 0 && hits[0].distance < bestDist) {
+                  bestDist = hits[0].distance;
+                  bestHit = hits[0].point.clone();
+                }
+              }
+
+              if (bestHit) {
+                const geo = new THREE.SphereGeometry(0.05, 8, 8);
+                const mat = new THREE.MeshBasicMaterial({ color: regionColors[region] || 0x00ff00 });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.copy(bestHit);
+                mesh.userData = { region, row: pt.row, col: pt.col };
+                markerGroup.add(mesh);
+                newSensors.push({
+                  pos: [bestHit.x, bestHit.y, bestHit.z],
+                  region,
+                  row: pt.row,
+                  col: pt.col,
+                  mesh
+                });
+                hitCount++;
+              }
             }
           }
 
           setSensors(prev => [...prev, ...newSensors]);
-          setStatus(`导入完成: ${hitCount}/${allPts.length} 个点成功贴敷到模型 (${Object.keys(data).join(', ')})`);
+          setStatus(`导入完成: ${hitCount}/${totalCount} 个点贴敷成功 (${Object.keys(data).join(', ')})`);
         } catch (err: any) {
           setStatus('导入失败: ' + err.message);
         }
@@ -1241,6 +1264,27 @@ export default function SensorMapper() {
           className="px-2 py-1 rounded text-xs bg-green-600 hover:bg-green-500">
           导入 JSON
         </button>
+        <select
+          className="px-1 py-1 rounded text-xs bg-slate-700 border border-white/10"
+          onChange={(e) => {
+            const val = e.target.value;
+            const { markerGroup } = sceneRef.current;
+            markerGroup.children.forEach((child: any) => {
+              if (val === 'all') {
+                child.visible = true;
+              } else {
+                child.visible = child.userData?.region === val;
+              }
+            });
+            setStatus(val === 'all' ? '显示全部区域' : `仅显示: ${val}`);
+          }}
+        >
+          <option value="all">全部区域</option>
+          <option value="前胸">前胸</option>
+          <option value="后背">后背</option>
+          <option value="右手臂">右手臂</option>
+          <option value="前裤">前裤</option>
+        </select>
         <button onClick={exportJSON} disabled={!sensors.length}
           className="px-2 py-1 rounded text-xs bg-amber-600 hover:bg-amber-500 disabled:opacity-40">
           导出 JSON
