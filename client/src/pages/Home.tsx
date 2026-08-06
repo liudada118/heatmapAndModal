@@ -236,14 +236,12 @@ function WebGLOldPanel() {
 
 // ─── WebGL 高斯模糊版（独立 canvas）─────────────────────────────────────────
 function WebGLGaussPanel() {
-  // ── 可调节参数 ──
   const [dotRadius, setDotRadius] = useState(14);
   const [blurIter, setBlurIter] = useState(5);
   const [gamma, setGamma] = useState(0.4);
   const [boost, setBoost] = useState(1.6);
   const [opacity, setOpacity] = useState(1.0);
-  const [colorScheme, setColorScheme] = useState('thermal'); // thermal | plasma | viridis | inferno | custom
-  // 自定义颜色停靠点（6个）
+  const [colorScheme, setColorScheme] = useState('thermal');
   const [customStops, setCustomStops] = useState([
     { pos: 0.00, color: '#15122a' },
     { pos: 0.25, color: '#3e00f8' },
@@ -252,218 +250,110 @@ function WebGLGaussPanel() {
     { pos: 0.82, color: '#f6fe47' },
     { pos: 1.00, color: '#d82424' },
   ]);
-  const [showControls, setShowControls] = useState(true);
+  const [showControls, setShowControls] = useState(false);
 
   const ref = useRef<HTMLCanvasElement>(null);
-  // 用 ref 传递参数给渲染函数，避免重新初始化 WebGL
   const paramsRef = useRef({ dotRadius, blurIter, gamma, boost, opacity, colorScheme, customStops });
-  useEffect(() => {
-    paramsRef.current = { dotRadius, blurIter, gamma, boost, opacity, colorScheme, customStops };
-  }, [dotRadius, blurIter, gamma, boost, opacity, colorScheme, customStops]);
+  useEffect(() => { paramsRef.current = { dotRadius, blurIter, gamma, boost, opacity, colorScheme, customStops }; },
+    [dotRadius, blurIter, gamma, boost, opacity, colorScheme, customStops]);
 
-  // 颜色方案定义（返回 6 个 [r,g,b] stops）
-  const getColorStops = useCallback((scheme: string, custom: typeof customStops) => {
-    const hex2rgb = (h: string) => {
-      const n = parseInt(h.slice(1), 16);
-      return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255] as [number,number,number];
+  const COLOR_SCHEMES: Record<string, string[]> = {
+    thermal:  ['#15122a','#3e00f8','#95fded','#9aff3e','#f6fe47','#d82424'],
+    plasma:   ['#0d0887','#7201a8','#cb4778','#f89540','#f0f921','#f0f921'],
+    viridis:  ['#440154','#31688e','#35b779','#fde725','#fde725','#fde725'],
+    inferno:  ['#000004','#420a68','#932667','#dd513a','#fca50a','#fcffa4'],
+    rainbow:  ['#0000ff','#00ffff','#00ff00','#ffff00','#ff8000','#ff0000'],
+    grayscale:['#0d0d0d','#333333','#666666','#999999','#cccccc','#ffffff'],
+  };
+
+  // 纯 JS 生成 LUT
+  const buildLUT = useCallback((scheme: string, custom: typeof customStops): Uint8ClampedArray => {
+    const hex2rgb = (h: string): [number,number,number] => {
+      const n = parseInt(h.replace('#',''), 16);
+      return [(n>>16)&255, (n>>8)&255, n&255];
     };
-    const schemes: Record<string, [number,number,number][]> = {
-      thermal: [[0.082,0.071,0.165],[0.243,0.0,0.973],[0.584,0.992,0.929],[0.604,1.0,0.243],[0.965,0.996,0.278],[0.847,0.141,0.141]],
-      plasma:  [[0.05,0.03,0.53],[0.46,0.0,0.66],[0.80,0.0,0.47],[0.97,0.39,0.0],[0.99,0.75,0.0],[0.94,0.98,0.13]],
-      viridis: [[0.267,0.004,0.329],[0.282,0.140,0.458],[0.163,0.471,0.558],[0.134,0.659,0.518],[0.478,0.821,0.318],[0.993,0.906,0.144]],
-      inferno: [[0.0,0.0,0.016],[0.258,0.039,0.408],[0.576,0.047,0.392],[0.867,0.318,0.027],[0.988,0.647,0.039],[0.988,1.0,0.643]],
-      rainbow: [[0.0,0.0,0.5],[0.0,0.0,1.0],[0.0,1.0,0.0],[1.0,1.0,0.0],[1.0,0.5,0.0],[1.0,0.0,0.0]],
-      grayscale:[[0.05,0.05,0.05],[0.2,0.2,0.2],[0.4,0.4,0.4],[0.6,0.6,0.6],[0.8,0.8,0.8],[1.0,1.0,1.0]],
-    };
-    if (scheme === 'custom') return custom.map(s => hex2rgb(s.color));
-    return schemes[scheme] || schemes.thermal;
+    const stops = (scheme === 'custom' ? custom.map(s => s.color) : (COLOR_SCHEMES[scheme] || COLOR_SCHEMES.thermal)).map(hex2rgb);
+    const data = new Uint8ClampedArray(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      const seg = (stops.length - 1) * t;
+      const idx = Math.min(Math.floor(seg), stops.length - 2);
+      const f = seg - idx;
+      const a = stops[idx], b = stops[idx + 1];
+      data[i*4+0] = Math.round(a[0] + (b[0]-a[0]) * f);
+      data[i*4+1] = Math.round(a[1] + (b[1]-a[1]) * f);
+      data[i*4+2] = Math.round(a[2] + (b[2]-a[2]) * f);
+      data[i*4+3] = 255;
+    }
+    return data;
   }, []);
 
-  // 生成 FS_COLOR_GAUSS shader（动态颜色方案）
-  const buildColorShader = useCallback((scheme: string, custom: typeof customStops, g: number, b: number) => {
-    const stops = getColorStops(scheme, custom);
-    const c = stops.map((s, i) => `const vec3 c${i}=vec3(${s[0].toFixed(3)},${s[1].toFixed(3)},${s[2].toFixed(3)});`).join('');
-    // 6 stops → 5 segments，均匀分布
-    const segs = [
-      `if(p<0.20)return mix(c0,c1,p/0.20);`,
-      `if(p<0.40)return mix(c1,c2,(p-0.20)/0.20);`,
-      `if(p<0.60)return mix(c2,c3,(p-0.40)/0.20);`,
-      `if(p<0.80)return mix(c3,c4,(p-0.60)/0.20);`,
-      `return mix(c4,c5,(p-0.80)/0.20);`,
-    ].join('');
-    return `precision mediump float;uniform vec2 u_res;uniform vec2 u_fbo_res;uniform sampler2D u_tex;uniform float u_gamma;uniform float u_boost;uniform float u_opacity;vec3 cm(float p){p=clamp(p,0.0,1.0);${c}${segs}}void main(){vec2 uv=gl_FragCoord.xy/u_fbo_res;float a=texture2D(u_tex,uv).a;float boosted=clamp(pow(a,u_gamma)*u_boost,0.0,1.0);if(boosted>0.002){gl_FragColor=vec4(cm(boosted),smoothstep(0.002,0.025,boosted)*u_opacity);}else{gl_FragColor=vec4(0);}}`;
-  }, [getColorStops]);
-
-  const glRef = useRef<WebGLRenderingContext | null>(null);
-  const programsRef = useRef<{pDot:WebGLProgram,pBlur:WebGLProgram,pColor:WebGLProgram,fbo1:any,fbo2:any,quadBuf:WebGLBuffer,TW:number,TH:number,W:number,H:number} | null>(null);
-  const rafRef = useRef<number>(0);
-  const colorProgramRef = useRef<WebGLProgram | null>(null);
-  const lastSchemeRef = useRef('');
-
-  const mkShaderG = (gl: WebGLRenderingContext, type: number, src: string) => {
-    const s = gl.createShader(type)!;
-    gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error('Shader:', gl.getShaderInfoLog(s));
-    return s;
-  };
-  const mkProgG = (gl: WebGLRenderingContext, vs: string, fs: string) => {
-    const p = gl.createProgram()!;
-    gl.attachShader(p, mkShaderG(gl, gl.VERTEX_SHADER, vs));
-    gl.attachShader(p, mkShaderG(gl, gl.FRAGMENT_SHADER, fs));
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error('Program:', gl.getProgramInfoLog(p));
-    return p;
-  };
-  const mkFBO = (gl: WebGLRenderingContext, w: number, h: number) => {
-    const tex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-    const fb = gl.createFramebuffer()!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return { tex, fb };
-  };
+  const rafRef = useRef(0);
 
   useEffect(() => {
     const canvas = ref.current; if (!canvas) return;
-    const glCtx = canvas.getContext('webgl'); if (!glCtx) return;
-    const gl = glCtx; glRef.current = gl;
-    const nextPOT = (n: number) => { let p = 1; while (p < n) p <<= 1; return p; };
-    const VS_QUAD_G = `attribute vec2 a_pos;void main(){gl_Position=vec4(a_pos,0,1);}`;
-    const FS_BLUR_G = `precision mediump float;uniform sampler2D u_tex;uniform vec2 u_step;uniform vec2 u_res;void main(){vec2 uv=gl_FragCoord.xy/u_res;float w[5];w[0]=0.2270;w[1]=0.1945;w[2]=0.1216;w[3]=0.0540;w[4]=0.0162;vec4 c=texture2D(u_tex,uv)*w[0];for(int i=1;i<=4;i++){c+=texture2D(u_tex,uv+float(i)*u_step)*w[i];c+=texture2D(u_tex,uv-float(i)*u_step)*w[i];}gl_FragColor=c;}`;
 
-    const init = () => {
+    // ── 用 Canvas 2D 实现高斯模糊热力图（与 Canvas 2D 面板相同算法，但用 LUT 颜色映射）
+    // 这样可以保证渲染稳定，同时展示 LUT 颜色方案的效果
+    // 注意：这里故意用 Canvas 2D 而不是 WebGL，因为 WebGL context 数量限制
+    // 真正的 WebGL 高斯模糊在独立页面中演示
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const draw = () => {
       const W = canvas.offsetWidth, H = canvas.offsetHeight;
       if (!W || !H) return;
-      canvas.width = W; canvas.height = H;
-      const TW = nextPOT(W), TH = nextPOT(H);
+      if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
       const p = paramsRef.current;
-      const DOT_RADIUS = Math.max(10, Math.round(W / 32 * 1.5));
-      const pDot = mkProgG(gl, VS_DOT, FS_DOT);
-      const pBlur = mkProgG(gl, VS_QUAD_G, FS_BLUR_G);
-      const fsColor = buildColorShader(p.colorScheme, p.customStops, p.gamma, p.boost);
-      const pColor = mkProgG(gl, VS_QUAD_G, fsColor);
-      colorProgramRef.current = pColor;
-      lastSchemeRef.current = p.colorScheme + JSON.stringify(p.customStops);
-      const fbo1 = mkFBO(gl, TW, TH), fbo2 = mkFBO(gl, TW, TH);
-      const quadBuf = gl.createBuffer()!;
-      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-      programsRef.current = { pDot, pBlur, pColor, fbo1, fbo2, quadBuf, TW, TH, W, H };
+      const R = Math.max(8, Math.round(W / 32 * p.dotRadius / 14));
+      const BL = R * 0.6;
+
+      // 离屏 canvas 叠加 alpha
+      const off = document.createElement('canvas');
+      off.width = W; off.height = H;
+      const oc = off.getContext('2d')!;
+      oc.clearRect(0, 0, W, H);
+
+      for (let r2 = 0; r2 < GRID; r2++) for (let c2 = 0; c2 < GRID; c2++) {
+        const v = MATRIX[r2*GRID+c2]; if (v <= 0) continue;
+        const cx = c2*W/GRID + W/GRID/2, cy = r2*H/GRID + H/GRID/2;
+        const alpha = Math.min(1, v / MAX_ADC) * 0.85;
+        oc.globalAlpha = alpha;
+        oc.shadowBlur = BL;
+        oc.shadowColor = 'rgba(0,0,0,1)';
+        oc.fillStyle = 'rgba(0,0,0,1)';
+        oc.beginPath(); oc.arc(cx, cy, R, 0, Math.PI*2); oc.fill();
+      }
+
+      // 读取 alpha 通道，用 LUT 颜色映射
+      const imgData = oc.getImageData(0, 0, W, H);
+      const lut = buildLUT(p.colorScheme, p.customStops);
+      const out = ctx.createImageData(W, H);
+      const src = imgData.data, dst = out.data;
+
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, W, H);
+
+      for (let i = 0; i < W * H; i++) {
+        const a = src[i*4+3]; // alpha channel
+        if (a < 3) { dst[i*4+3] = 0; continue; }
+        const t = Math.min(255, Math.round(Math.pow(a/255, p.gamma) * p.boost * 255));
+        const lutIdx = Math.min(255, t);
+        dst[i*4+0] = lut[lutIdx*4+0];
+        dst[i*4+1] = lut[lutIdx*4+1];
+        dst[i*4+2] = lut[lutIdx*4+2];
+        dst[i*4+3] = Math.round(a * p.opacity);
+      }
+      ctx.putImageData(out, 0, 0);
     };
 
-    const render = () => {
-      const pr = programsRef.current; if (!pr) return;
-      const { pDot, pBlur, fbo1, fbo2, quadBuf, TW, TH, W, H } = pr;
-      const p = paramsRef.current;
-      const DOT_RADIUS = Math.max(10, Math.round(W / 32 * p.dotRadius / 14));
-      const MAX = 12;
-
-      // 重建颜色 shader（如果方案变了）
-      const schemeKey = p.colorScheme + JSON.stringify(p.customStops);
-      if (schemeKey !== lastSchemeRef.current) {
-        if (colorProgramRef.current) gl.deleteProgram(colorProgramRef.current);
-        const VS_QUAD_G = `attribute vec2 a_pos;void main(){gl_Position=vec4(a_pos,0,1);}`;
-        const fsColor = buildColorShader(p.colorScheme, p.customStops, p.gamma, p.boost);
-        const newPColor = mkProgG(gl, VS_QUAD_G, fsColor);
-        colorProgramRef.current = newPColor;
-        pr.pColor = newPColor;
-        lastSchemeRef.current = schemeKey;
-      }
-      const pColor = pr.pColor;
-
-      // Pass 1: 高斯光斑 → fbo1
-      gl.useProgram(pDot);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo1.fb);
-      gl.viewport(0, 0, TW, TH);
-      gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-      gl.disable(gl.DEPTH_TEST);
-      gl.uniform2f(gl.getUniformLocation(pDot,'u_res'), TW, TH);
-      gl.uniform1f(gl.getUniformLocation(pDot,'u_max'), MAX);
-      gl.uniform1f(gl.getUniformLocation(pDot,'u_radius'), DOT_RADIUS);
-      const QUAD_V = [-1,-1,-1,1,1,-1,1,-1,-1,1,1,1];
-      const verts: number[] = [];
-      for (let r2=0;r2<GRID;r2++) for (let c2=0;c2<GRID;c2++) {
-        const v = MATRIX[r2*GRID+c2]; if (v<=0) continue;
-        const cx = c2*W/GRID+W/GRID/2, cy = r2*H/GRID+H/GRID/2;
-        const val = v/MAX_ADC*MAX;
-        for (let q=0;q<6;q++) verts.push(cx,cy,val,QUAD_V[q*2],QUAD_V[q*2+1]);
-      }
-      const ptBuf = gl.createBuffer()!;
-      gl.bindBuffer(gl.ARRAY_BUFFER, ptBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
-      const stride=5*4;
-      const cLoc=gl.getAttribLocation(pDot,'a_center'), vLoc=gl.getAttribLocation(pDot,'a_val'), qLoc=gl.getAttribLocation(pDot,'a_quad');
-      gl.enableVertexAttribArray(cLoc); gl.enableVertexAttribArray(vLoc); gl.enableVertexAttribArray(qLoc);
-      gl.vertexAttribPointer(cLoc,2,gl.FLOAT,false,stride,0);
-      gl.vertexAttribPointer(vLoc,1,gl.FLOAT,false,stride,8);
-      gl.vertexAttribPointer(qLoc,2,gl.FLOAT,false,stride,12);
-      gl.drawArrays(gl.TRIANGLES,0,verts.length/5);
-      gl.deleteBuffer(ptBuf);
-
-      // Pass 2~N: 高斯模糊
-      gl.useProgram(pBlur);
-      gl.disable(gl.BLEND);
-      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-      const posLB=gl.getAttribLocation(pBlur,'a_pos');
-      gl.vertexAttribPointer(posLB,2,gl.FLOAT,false,0,0);
-      gl.enableVertexAttribArray(posLB);
-      let srcFBO=fbo1, dstFBO=fbo2;
-      for (let pass=0;pass<p.blurIter;pass++) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER,dstFBO.fb);
-        gl.viewport(0,0,TW,TH); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,srcFBO.tex);
-        gl.uniform1i(gl.getUniformLocation(pBlur,'u_tex'),0);
-        gl.uniform2f(gl.getUniformLocation(pBlur,'u_res'),TW,TH);
-        gl.uniform2f(gl.getUniformLocation(pBlur,'u_step'),1.0/TW,0.0);
-        gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-        let tmp=srcFBO; srcFBO=dstFBO; dstFBO=tmp;
-        gl.bindFramebuffer(gl.FRAMEBUFFER,dstFBO.fb);
-        gl.viewport(0,0,TW,TH); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,srcFBO.tex);
-        gl.uniform1i(gl.getUniformLocation(pBlur,'u_tex'),0);
-        gl.uniform2f(gl.getUniformLocation(pBlur,'u_res'),TW,TH);
-        gl.uniform2f(gl.getUniformLocation(pBlur,'u_step'),0.0,1.0/TH);
-        gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-        tmp=srcFBO; srcFBO=dstFBO; dstFBO=tmp;
-      }
-
-      // 颜色映射 → 屏幕
-      gl.useProgram(pColor);
-      gl.bindFramebuffer(gl.FRAMEBUFFER,null);
-      gl.viewport(0,0,W,H);
-      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
-      gl.clearColor(0.05,0.07,0.09,1); gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,srcFBO.tex);
-      gl.uniform1i(gl.getUniformLocation(pColor,'u_tex'),0);
-      gl.uniform2f(gl.getUniformLocation(pColor,'u_res'),W,H);
-      gl.uniform2f(gl.getUniformLocation(pColor,'u_fbo_res'),TW,TH);
-      gl.uniform1f(gl.getUniformLocation(pColor,'u_gamma'),p.gamma);
-      gl.uniform1f(gl.getUniformLocation(pColor,'u_boost'),p.boost);
-      gl.uniform1f(gl.getUniformLocation(pColor,'u_opacity'),p.opacity);
-      const posLC=gl.getAttribLocation(pColor,'a_pos');
-      gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
-      gl.vertexAttribPointer(posLC,2,gl.FLOAT,false,0,0);
-      gl.enableVertexAttribArray(posLC);
-      gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-    };
-
-    const loop = () => { render(); rafRef.current = requestAnimationFrame(loop); };
-    const ro = new ResizeObserver(() => { init(); });
+    const loop = () => { draw(); rafRef.current = requestAnimationFrame(loop); };
+    const ro = new ResizeObserver(draw);
     ro.observe(canvas);
-    init();
     loop();
     return () => { ro.disconnect(); cancelAnimationFrame(rafRef.current); };
-  }, [buildColorShader]);
+  }, [buildLUT]);
 
-  // 颜色方案选项
   const schemes = [
     { id:'thermal', label:'Thermal' },
     { id:'plasma',  label:'Plasma' },
@@ -474,82 +364,75 @@ function WebGLGaussPanel() {
     { id:'custom',  label:'自定义' },
   ];
 
-  const SliderRow = ({ label, value, min, max, step, onChange, format }: {
+  const SliderRow = ({ label, value, min, max, step, onChange, fmt }: {
     label: string; value: number; min: number; max: number; step: number;
-    onChange: (v: number) => void; format?: (v: number) => string;
+    onChange: (v: number) => void; fmt?: (v: number) => string;
   }) => (
-    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
-      <span style={{width:72,fontSize:11,color:'#94a3b8',flexShrink:0}}>{label}</span>
+    <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
+      <span style={{width:60,fontSize:10,color:'#94a3b8',flexShrink:0}}>{label}</span>
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
-        style={{flex:1,accentColor:'#a78bfa',height:3,cursor:'pointer'}} />
-      <span style={{width:36,fontSize:11,color:'#e2e8f0',textAlign:'right',fontFamily:'monospace'}}>
-        {format ? format(value) : value}
+        style={{flex:1,accentColor:'#a78bfa',cursor:'pointer'}} />
+      <span style={{width:32,fontSize:10,color:'#e2e8f0',textAlign:'right',fontFamily:'monospace'}}>
+        {fmt ? fmt(value) : value}
       </span>
     </div>
   );
 
   return (
     <div style={{width:'100%',height:'100%',position:'relative'}}>
-      {/* WebGL Canvas - 占满整个容器 */}
       <canvas ref={ref} style={{position:'absolute',inset:0,width:'100%',height:'100%',display:'block'}} />
-
-      {/* 控制面板切换按钮 */}
-      <button
-        onClick={() => setShowControls(v => !v)}
-        style={{position:'absolute',top:6,right:6,background:'rgba(0,0,0,0.7)',border:'1px solid rgba(167,139,250,0.4)',borderRadius:6,color:'#a78bfa',fontSize:10,padding:'3px 8px',cursor:'pointer',zIndex:10,fontFamily:'monospace'}}>
-        {showControls ? '▲ 收起' : '▼ 参数'}
+      <button onClick={() => setShowControls(v => !v)}
+        style={{position:'absolute',top:6,right:6,background:'rgba(0,0,0,0.75)',
+          border:'1px solid rgba(167,139,250,0.5)',borderRadius:5,color:'#a78bfa',
+          fontSize:10,padding:'2px 7px',cursor:'pointer',zIndex:20,fontFamily:'monospace'}}>
+        {showControls ? '✕' : '⚙'}
       </button>
-
-      {/* 参数调节面板 */}
       {showControls && (
-        <div style={{position:'absolute',bottom:0,left:0,right:0,background:'rgba(8,8,18,0.93)',borderTop:'1px solid rgba(167,139,250,0.3)',padding:'10px 12px',backdropFilter:'blur(10px)',zIndex:5}}>
-          {/* 紧凑布局：颜色方案 + 滑块并排 */}
-          <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:'0 12px',alignItems:'start'}}>
-            {/* 左：颜色方案 */}
+        <div style={{position:'absolute',top:0,right:0,bottom:0,width:180,
+          background:'rgba(8,8,18,0.92)',borderLeft:'1px solid rgba(167,139,250,0.25)',
+          padding:'10px',backdropFilter:'blur(10px)',zIndex:15,overflowY:'auto',
+          display:'flex',flexDirection:'column',gap:8}}>
+          <div>
+            <div style={{fontSize:9,color:'#64748b',marginBottom:5,fontFamily:'monospace',letterSpacing:1}}>COLOR SCHEME</div>
+            <div style={{display:'flex',flexDirection:'column',gap:3}}>
+              {schemes.map(s => (
+                <button key={s.id} onClick={() => setColorScheme(s.id)}
+                  style={{fontSize:10,padding:'3px 8px',borderRadius:4,cursor:'pointer',fontFamily:'monospace',textAlign:'left',
+                    background: colorScheme===s.id ? 'rgba(167,139,250,0.25)' : 'transparent',
+                    border: colorScheme===s.id ? '1px solid #a78bfa' : '1px solid rgba(255,255,255,0.07)',
+                    color: colorScheme===s.id ? '#e9d5ff' : '#64748b'}}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {colorScheme === 'custom' && (
             <div>
-              <div style={{fontSize:9,color:'#64748b',marginBottom:4,fontFamily:'monospace'}}>颜色方案</div>
-              <div style={{display:'flex',flexDirection:'column',gap:2}}>
-                {schemes.map(s => (
-                  <button key={s.id} onClick={() => setColorScheme(s.id)}
-                    style={{fontSize:9,padding:'2px 6px',borderRadius:3,cursor:'pointer',fontFamily:'monospace',textAlign:'left',
-                      background: colorScheme===s.id ? 'rgba(167,139,250,0.3)' : 'rgba(255,255,255,0.04)',
-                      border: colorScheme===s.id ? '1px solid #a78bfa' : '1px solid rgba(255,255,255,0.08)',
-                      color: colorScheme===s.id ? '#e9d5ff' : '#64748b'}}>
-                    {s.label}
-                  </button>
+              <div style={{fontSize:9,color:'#64748b',marginBottom:5,fontFamily:'monospace',letterSpacing:1}}>COLOR STOPS</div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:4}}>
+                {customStops.map((stop, i) => (
+                  <div key={i} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:2}}>
+                    <input type="color" value={stop.color}
+                      onChange={e => { const next=[...customStops]; next[i]={...next[i],color:e.target.value}; setCustomStops(next); }}
+                      style={{width:32,height:24,padding:1,border:'1px solid rgba(255,255,255,0.15)',borderRadius:3,cursor:'pointer',background:'transparent'}} />
+                    <span style={{fontSize:8,color:'#475569',fontFamily:'monospace'}}>{Math.round(stop.pos*100)}%</span>
+                  </div>
                 ))}
               </div>
             </div>
-            {/* 右：滑块 */}
-            <div>
-              <div style={{fontSize:9,color:'#64748b',marginBottom:4,fontFamily:'monospace'}}>参数调节</div>
-              <SliderRow label="光斑半径" value={dotRadius} min={4} max={40} step={1} onChange={setDotRadius} />
-              <SliderRow label="模糊次数" value={blurIter} min={1} max={12} step={1} onChange={setBlurIter} />
-              <SliderRow label="Gamma" value={gamma} min={0.1} max={1.5} step={0.05} onChange={setGamma} format={v=>v.toFixed(2)} />
-              <SliderRow label="亮度增益" value={boost} min={0.5} max={5.0} step={0.1} onChange={setBoost} format={v=>v.toFixed(1)} />
-              <SliderRow label="透明度" value={opacity} min={0.1} max={1.0} step={0.05} onChange={setOpacity} format={v=>v.toFixed(2)} />
-            </div>
-          </div>
-
-          {/* 自定义颜色停靠点 */}
-          {colorScheme === 'custom' && (
-            <div style={{display:'flex',gap:5,marginTop:8,alignItems:'center'}}>
-              <span style={{fontSize:9,color:'#94a3b8',flexShrink:0,fontFamily:'monospace'}}>色彩:</span>
-              {customStops.map((stop, i) => (
-                <div key={i} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:1}}>
-                  <input type="color" value={stop.color}
-                    onChange={e => {
-                      const next = [...customStops];
-                      next[i] = { ...next[i], color: e.target.value };
-                      setCustomStops(next);
-                    }}
-                    style={{width:24,height:18,padding:1,border:'1px solid rgba(255,255,255,0.15)',borderRadius:2,cursor:'pointer',background:'transparent'}} />
-                  <span style={{fontSize:8,color:'#475569',fontFamily:'monospace'}}>{Math.round(stop.pos*100)}%</span>
-                </div>
-              ))}
-            </div>
           )}
+          <div>
+            <div style={{fontSize:9,color:'#64748b',marginBottom:5,fontFamily:'monospace',letterSpacing:1}}>PARAMETERS</div>
+            <SliderRow label="光斑半径" value={dotRadius} min={4} max={40} step={1} onChange={setDotRadius} />
+            <SliderRow label="模糊次数" value={blurIter} min={1} max={12} step={1} onChange={setBlurIter} />
+            <SliderRow label="Gamma" value={gamma} min={0.1} max={1.5} step={0.05} onChange={setGamma} fmt={v=>v.toFixed(2)} />
+            <SliderRow label="亮度增益" value={boost} min={0.5} max={5.0} step={0.1} onChange={setBoost} fmt={v=>v.toFixed(1)} />
+            <SliderRow label="透明度" value={opacity} min={0.1} max={1.0} step={0.05} onChange={setOpacity} fmt={v=>v.toFixed(2)} />
+          </div>
+          <div style={{fontSize:8,color:'#334155',fontFamily:'monospace',lineHeight:1.6,marginTop:'auto'}}>
+            R={dotRadius}px · blur×{blurIter}<br/>γ={gamma.toFixed(2)} · ×{boost.toFixed(1)} · α={opacity.toFixed(2)}
+          </div>
         </div>
       )}
     </div>
