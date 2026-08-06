@@ -159,7 +159,7 @@ const FS_COLOR=`precision mediump float;uniform vec2 u_res;uniform sampler2D u_t
 // ── 修复版 shader：高斯衰减 + 深紫起点 + 无过曝 ──
 const FS1_FIXED=`precision mediump float;varying vec2 v_center,v_res;varying float v_radius,v_max,v_min,v_val,v_blur;void main(){float x=gl_FragCoord.x,y=v_res.y-gl_FragCoord.y;float dist=length(vec2(v_center.x-x,v_center.y-y));float diff=v_radius-dist;float pxA=clamp((v_val-v_min)/(v_max-v_min),0.0,1.0);if(v_val>=v_max)pxA=1.0;if(dist<v_radius){float sigma=v_radius*0.4;float g=exp(-(dist*dist)/(2.0*sigma*sigma));gl_FragColor=vec4(0,0,0,g*pxA);}else{gl_FragColor=vec4(0,0,0,0);}}`;
 // 修复版颜色映射：去掉 *1.5 过曝，alpha 输出用 smoothstep 柔化边缘
-const FS_COLOR_FIXED=`precision mediump float;uniform vec2 u_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_res;float a=texture2D(u_tex,uv).a;if(a>0.005){vec3 col=cm(a);gl_FragColor=vec4(col,smoothstep(0.005,0.08,a));}else{gl_FragColor=vec4(0);}}`;
+const FS_COLOR_FIXED=`precision mediump float;uniform vec2 u_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_res;float a=texture2D(u_tex,uv).a;if(a>0.005){vec3 col=cm(a);gl_FragColor=vec4(col,a*0.92);}else{gl_FragColor=vec4(0);}}`;
 
 // VS_DOT: 每个点用 2 个三角形（6顶点）展开，避免 gl_PointSize 硬件限制
 // a_quad: [-1,-1, -1,1, 1,-1, 1,-1, -1,1, 1,1] * radius + center
@@ -247,7 +247,7 @@ function WebGLFixedPanel() {
     const W = canvas.offsetWidth, H = canvas.offsetHeight;
     canvas.width = W; canvas.height = H;
     const gl = canvas.getContext('webgl'); if (!gl) return;
-    const RADIUS = 18, MAX = 12, BLUR = 0.65;
+    const RADIUS = 22, MAX = 12, BLUR = 0.65; // RADIUS=22 匹配 Canvas 2D
     const p1 = mkProg(gl, VS1_OLD, FS1_FIXED);
     const p2 = mkProg(gl, VS_QUAD, FS_COLOR_FIXED);
     const pts: number[] = [];
