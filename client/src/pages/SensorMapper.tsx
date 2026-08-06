@@ -1035,6 +1035,102 @@ export default function SensorMapper() {
     URL.revokeObjectURL(url);
   }, [sensors]);
 
+
+  // 导入传感器坐标 JSON（连体衣点位坐标格式）
+  const importJSON = useCallback(() => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = (e: any) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target?.result as string);
+          if (!sceneRef.current.model) {
+            setStatus('请先加载模型再导入坐标');
+            return;
+          }
+          const { scene, markerGroup, model } = sceneRef.current;
+          const box = new THREE.Box3().setFromObject(model);
+          const modelSize = box.getSize(new THREE.Vector3());
+          const modelCenter = box.getCenter(new THREE.Vector3());
+
+          // 收集所有点的 x,y 坐标，计算全局范围
+          const allPts: {x:number, y:number, region:string, row:number, col:number}[] = [];
+          for (const [region, points] of Object.entries(data)) {
+            (points as any[]).forEach(p => {
+              allPts.push({ x: p.x, y: p.y, region, row: p.row, col: p.col });
+            });
+          }
+          const xs = allPts.map(p => p.x);
+          const ys = allPts.map(p => p.y);
+          const xMin = Math.min(...xs), xMax = Math.max(...xs);
+          const yMin = Math.min(...ys), yMax = Math.max(...ys);
+
+          // 部位到模型区域的映射（Y轴高度范围，归一化 0=底部 1=顶部）
+          const REGION_MAP: Record<string, {yRange:[number,number], zSign:number, rayDir:[number,number,number]}> = {
+            '前胸': { yRange: [0.45, 0.85], zSign: 1, rayDir: [0, 0, -1] },
+            '后背': { yRange: [0.45, 0.85], zSign: -1, rayDir: [0, 0, 1] },
+            '右手臂': { yRange: [0.50, 0.75], zSign: 1, rayDir: [1, 0, 0] },
+            '前裤': { yRange: [0.05, 0.45], zSign: 1, rayDir: [0, 0, -1] },
+          };
+
+          const raycaster = new THREE.Raycaster();
+          const newSensors: any[] = [];
+          let hitCount = 0;
+
+          for (const pt of allPts) {
+            const regionCfg = REGION_MAP[pt.region] || { yRange: [0.3, 0.8], zSign: 1, rayDir: [0, 0, -1] };
+            // 归一化坐标到 [0, 1]
+            const nx = (pt.x - xMin) / (xMax - xMin || 1);
+            const ny = (pt.y - yMin) / (yMax - yMin || 1);
+
+            // 映射到模型空间
+            const worldX = modelCenter.x + (nx - 0.5) * modelSize.x * 0.8;
+            const worldY = box.min.y + (regionCfg.yRange[0] + ny * (regionCfg.yRange[1] - regionCfg.yRange[0])) * modelSize.y;
+            const worldZ = modelCenter.z + regionCfg.zSign * modelSize.z * 1.5;
+
+            // 射线投射到模型表面
+            const origin = new THREE.Vector3(worldX, worldY, worldZ);
+            const dir = new THREE.Vector3(...regionCfg.rayDir).normalize();
+            raycaster.set(origin, dir);
+            const hits = raycaster.intersectObject(model, true);
+
+            if (hits.length > 0) {
+              const pos = hits[0].point;
+              // 创建标记球
+              const geo = new THREE.SphereGeometry(0.06, 8, 8);
+              const regionColors: Record<string, number> = {
+                '前胸': 0x00ff88, '后背': 0xff8800, '右手臂': 0x8800ff, '前裤': 0x00aaff
+              };
+              const mat = new THREE.MeshBasicMaterial({ color: regionColors[pt.region] || 0x00ff00 });
+              const mesh = new THREE.Mesh(geo, mat);
+              mesh.position.copy(pos);
+              markerGroup.add(mesh);
+              newSensors.push({
+                pos: [pos.x, pos.y, pos.z],
+                region: pt.region,
+                row: pt.row,
+                col: pt.col,
+                mesh
+              });
+              hitCount++;
+            }
+          }
+
+          setSensors(prev => [...prev, ...newSensors]);
+          setStatus(`导入完成: ${hitCount}/${allPts.length} 个点成功贴敷到模型 (${Object.keys(data).join(', ')})`);
+        } catch (err: any) {
+          setStatus('导入失败: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }, []);
+
   // 清除所有标注
   const clearAll = useCallback(() => {
     sceneRef.current.markerGroup?.children.forEach((child: THREE.Object3D) => disposeObject3D(child));
@@ -1141,6 +1237,10 @@ export default function SensorMapper() {
         <div className="flex-1" />
         <span className="text-xs text-slate-400">{sensors.length} 个点</span>
         <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-red-600/80 hover:bg-red-500">清除</button>
+        <button onClick={importJSON}
+          className="px-2 py-1 rounded text-xs bg-green-600 hover:bg-green-500">
+          导入 JSON
+        </button>
         <button onClick={exportJSON} disabled={!sensors.length}
           className="px-2 py-1 rounded text-xs bg-amber-600 hover:bg-amber-500 disabled:opacity-40">
           导出 JSON
