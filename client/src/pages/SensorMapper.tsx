@@ -1233,7 +1233,7 @@ export default function SensorMapper() {
             }
           });
 
-          const raycaster = new THREE.Raycaster();
+          const rc = new THREE.Raycaster();
 
           for (const [region, points] of Object.entries(data)) {
             const pts = points as any[];
@@ -1261,8 +1261,8 @@ export default function SensorMapper() {
               } else {
                 origin.x = modelCenter.x + mapping.offsetSign * modelSize.x * 2;
               }
-              raycaster.set(origin, mapping.rayDir);
-              let hits = raycaster.intersectObject(model, true);
+              rc.set(origin, mapping.rayDir);
+              let hits = rc.intersectObject(model, true);
 
               // 反方向尝试
               if (hits.length === 0) {
@@ -1272,8 +1272,8 @@ export default function SensorMapper() {
                 } else {
                   reverseOrigin.x = modelCenter.x - mapping.offsetSign * modelSize.x * 2;
                 }
-                raycaster.set(reverseOrigin, mapping.rayDir.clone().negate());
-                hits = raycaster.intersectObject(model, true);
+                rc.set(reverseOrigin, mapping.rayDir.clone().negate());
+                hits = rc.intersectObject(model, true);
               }
 
               let finalPos: THREE.Vector3;
