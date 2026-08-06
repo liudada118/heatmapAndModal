@@ -156,6 +156,11 @@ const VS1_OLD=`attribute vec4 a_Position;uniform vec2 u_res;uniform float u_max,
 const FS1_OLD=`precision mediump float;varying vec2 v_center,v_res;varying float v_radius,v_max,v_min,v_val,v_blur;void main(){float x=gl_FragCoord.x,y=v_res.y-gl_FragCoord.y;float dist=length(vec2(v_center.x-x,v_center.y-y));float diff=v_radius-dist;float pxA=clamp((v_val-v_min)/(v_max-v_min),0.0,1.0);if(v_val>=v_max)pxA=1.0;if(diff>0.0){float t=diff/(v_radius*v_blur);gl_FragColor=vec4(0,0,0,smoothstep(0.0,1.0,t)*pxA);}else{gl_FragColor=vec4(0,0,0,0);}}`;
 const VS_QUAD=`attribute vec2 a_pos;void main(){gl_Position=vec4(a_pos,0,1);}`;
 const FS_COLOR=`precision mediump float;uniform vec2 u_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_res;float a=texture2D(u_tex,uv).a;if(a>0.01){gl_FragColor=vec4(cm(a),smoothstep(0.01,0.10,a));}else{gl_FragColor=vec4(0);}}`;
+// ── 修复版 shader：高斯衰减 + 深紫起点 + 无过曝 ──
+const FS1_FIXED=`precision mediump float;varying vec2 v_center,v_res;varying float v_radius,v_max,v_min,v_val,v_blur;void main(){float x=gl_FragCoord.x,y=v_res.y-gl_FragCoord.y;float dist=length(vec2(v_center.x-x,v_center.y-y));float diff=v_radius-dist;float pxA=clamp((v_val-v_min)/(v_max-v_min),0.0,1.0);if(v_val>=v_max)pxA=1.0;if(dist<v_radius){float sigma=v_radius*0.4;float g=exp(-(dist*dist)/(2.0*sigma*sigma));gl_FragColor=vec4(0,0,0,g*pxA);}else{gl_FragColor=vec4(0,0,0,0);}}`;
+// 修复版颜色映射：去掉 *1.5 过曝，alpha 输出用 smoothstep 柔化边缘
+const FS_COLOR_FIXED=`precision mediump float;uniform vec2 u_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_res;float a=texture2D(u_tex,uv).a;if(a>0.005){vec3 col=cm(a);gl_FragColor=vec4(col,smoothstep(0.005,0.08,a));}else{gl_FragColor=vec4(0);}}`;
+
 // VS_DOT: 每个点用 2 个三角形（6顶点）展开，避免 gl_PointSize 硬件限制
 // a_quad: [-1,-1, -1,1, 1,-1, 1,-1, -1,1, 1,1] * radius + center
 const VS_DOT=`attribute vec2 a_center;attribute float a_val;attribute vec2 a_quad;uniform vec2 u_res;uniform float u_max;uniform float u_radius;varying float v_alpha;varying vec2 v_center;varying vec2 v_fragPos;void main(){vec2 pos=a_center+a_quad*u_radius;vec2 clip=pos/u_res*2.0-1.0;gl_Position=vec4(clip*vec2(1,-1),0,1);v_alpha=clamp(a_val/u_max,0.0,1.0);v_center=a_center;v_fragPos=pos;}`;
@@ -190,6 +195,61 @@ function WebGLOldPanel() {
     const RADIUS = 18, MAX = 12, BLUR = 0.65;
     const p1 = mkProg(gl, VS1_OLD, FS1_OLD);
     const p2 = mkProg(gl, VS_QUAD, FS_COLOR);
+    const pts: number[] = [];
+    for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) {
+      const v = MATRIX[r * GRID + c]; if (v <= 0) continue;
+      pts.push(c * W / GRID + W / GRID / 2, r * H / GRID + H / GRID / 2, v / MAX_ADC * MAX);
+    }
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.useProgram(p1); gl.viewport(0, 0, W, H);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.uniform2f(gl.getUniformLocation(p1,'u_res'),W,H);
+    gl.uniform1f(gl.getUniformLocation(p1,'u_max'),MAX);
+    gl.uniform1f(gl.getUniformLocation(p1,'u_min'),0);
+    gl.uniform1f(gl.getUniformLocation(p1,'u_blur'),BLUR);
+    gl.vertexAttrib1f(gl.getAttribLocation(p1,'a_radius'),RADIUS+1);
+    const buf = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(gl.getAttribLocation(p1,'a_center'));
+    gl.enableVertexAttribArray(gl.getAttribLocation(p1,'a_val'));
+    gl.vertexAttribPointer(gl.getAttribLocation(p1,'a_center'),2,gl.FLOAT,false,12,0);
+    gl.vertexAttribPointer(gl.getAttribLocation(p1,'a_val'),1,gl.FLOAT,false,12,8);
+    gl.drawArrays(gl.POINTS, 0, pts.length / 3);
+    gl.useProgram(p2); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.clearColor(0.05,0.07,0.09,1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(gl.getUniformLocation(p2,'u_tex'),0);
+    gl.uniform2f(gl.getUniformLocation(p2,'u_res'),W,H);
+    const pL = gl.getAttribLocation(p2,'a_pos');
+    const vb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+    gl.vertexAttribPointer(pL,2,gl.FLOAT,false,0,0); gl.enableVertexAttribArray(pL);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }, []);
+  return <canvas ref={ref} style={{width:'100%',height:'100%',display:'block'}} />;
+}
+
+// ─── WebGL 高斯模糊版（独立 canvas）─────────────────────────────────────────
+function WebGLFixedPanel() {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current; if (!canvas) return;
+    const W = canvas.offsetWidth, H = canvas.offsetHeight;
+    canvas.width = W; canvas.height = H;
+    const gl = canvas.getContext('webgl'); if (!gl) return;
+    const RADIUS = 18, MAX = 12, BLUR = 0.65;
+    const p1 = mkProg(gl, VS1_OLD, FS1_FIXED);
+    const p2 = mkProg(gl, VS_QUAD, FS_COLOR_FIXED);
     const pts: number[] = [];
     for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) {
       const v = MATRIX[r * GRID + c]; if (v <= 0) continue;
@@ -445,12 +505,17 @@ function WebGLCompare() {
     <div style={{width:'100%',height:'100%',display:'flex',position:'relative'}}>
       <div style={{flex:1,position:'relative',overflow:'hidden'}}>
         <WebGLOldPanel />
-        <div style={{position:'absolute',top:8,left:'50%',transform:'translateX(-50%)',fontSize:10,color:'rgba(239,68,68,0.9)',fontFamily:'monospace',background:'rgba(0,0,0,0.65)',padding:'2px 7px',borderRadius:4,pointerEvents:'none',whiteSpace:'nowrap'}}>旧版 · gl.POINTS</div>
+        <div style={{position:'absolute',top:8,left:'50%',transform:'translateX(-50%)',fontSize:10,color:'rgba(239,68,68,0.9)',fontFamily:'monospace',background:'rgba(0,0,0,0.65)',padding:'2px 7px',borderRadius:4,pointerEvents:'none',whiteSpace:'nowrap'}}>旧版 · 线性截断</div>
+      </div>
+      <div style={{width:1,background:'rgba(255,255,255,0.18)',flexShrink:0}} />
+      <div style={{flex:1,position:'relative',overflow:'hidden'}}>
+        <WebGLFixedPanel />
+        <div style={{position:'absolute',top:8,left:'50%',transform:'translateX(-50%)',fontSize:10,color:'rgba(34,197,94,0.95)',fontFamily:'monospace',background:'rgba(0,0,0,0.65)',padding:'2px 7px',borderRadius:4,pointerEvents:'none',whiteSpace:'nowrap'}}>修复 · 高斯衰减</div>
       </div>
       <div style={{width:1,background:'rgba(255,255,255,0.18)',flexShrink:0}} />
       <div style={{flex:1,position:'relative',overflow:'hidden'}}>
         <WebGLGaussPanel />
-        <div style={{position:'absolute',top:8,left:'50%',transform:'translateX(-50%)',fontSize:10,color:'rgba(168,85,247,0.95)',fontFamily:'monospace',background:'rgba(0,0,0,0.65)',padding:'2px 7px',borderRadius:4,pointerEvents:'none',whiteSpace:'nowrap'}}>高斯模糊 · 4-Pass</div>
+        <div style={{position:'absolute',top:8,right:6,fontSize:10,color:'rgba(168,85,247,0.95)',fontFamily:'monospace',background:'rgba(0,0,0,0.65)',padding:'2px 7px',borderRadius:4,pointerEvents:'none',whiteSpace:'nowrap'}}>LUT · 可调参数</div>
       </div>
     </div>
   );
