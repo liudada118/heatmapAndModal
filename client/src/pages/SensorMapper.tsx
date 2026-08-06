@@ -1206,9 +1206,7 @@ export default function SensorMapper() {
             '左手臂': 0xff00ff, '后裤': 0xffaa00
           };
 
-          // 每个区域映射到模型的局部范围（归一化比例）
-          // xRange: 模型宽度的哪个区间, yRange: 模型高度的哪个区间
-          // rayDir: 主射线方向, rayOffset: 射线起点偏移轴
+          // 每个区域映射到模型的局部范围
           const REGION_MAPPING: Record<string, {
             xRange: [number, number], yRange: [number, number],
             rayDir: THREE.Vector3, offsetAxis: 'z'|'x', offsetSign: number
@@ -1219,11 +1217,28 @@ export default function SensorMapper() {
             '前裤': { xRange: [0.30, 0.70], yRange: [0.05, 0.50], rayDir: new THREE.Vector3(0,0,-1), offsetAxis: 'z', offsetSign: 1 },
           };
 
+          // 预提取模型所有顶点位置（用于最近点查找）
+          const modelVertices: THREE.Vector3[] = [];
+          model.traverse((child: any) => {
+            if (child.isMesh && child.geometry) {
+              const pos = child.geometry.attributes.position;
+              if (pos) {
+                const worldMatrix = child.matrixWorld;
+                for (let i = 0; i < pos.count; i++) {
+                  const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+                  v.applyMatrix4(worldMatrix);
+                  modelVertices.push(v);
+                }
+              }
+            }
+          });
+
+          const raycaster = new THREE.Raycaster();
+
           for (const [region, points] of Object.entries(data)) {
             const pts = points as any[];
             totalCount += pts.length;
 
-            // 计算该区域自身的坐标范围
             const rxs = pts.map((p: any) => p.x);
             const rys = pts.map((p: any) => p.y);
             const rxMin = Math.min(...rxs), rxMax = Math.max(...rxs);
@@ -1232,7 +1247,6 @@ export default function SensorMapper() {
             const mapping = REGION_MAPPING[region] || REGION_MAPPING['前胸'];
 
             for (const pt of pts) {
-              // 归一化到 [0,1]（区域内部坐标）
               const nx = (pt.x - rxMin) / (rxMax - rxMin || 1);
               const ny = (pt.y - ryMin) / (ryMax - ryMin || 1);
 
@@ -1240,51 +1254,64 @@ export default function SensorMapper() {
               const worldX = box.min.x + (mapping.xRange[0] + nx * (mapping.xRange[1] - mapping.xRange[0])) * modelSize.x;
               const worldY = box.min.y + (mapping.yRange[0] + ny * (mapping.yRange[1] - mapping.yRange[0])) * modelSize.y;
 
-              // 射线起点：从模型外部向内射
+              // 先尝试射线投射
               const origin = new THREE.Vector3(worldX, worldY, modelCenter.z);
               if (mapping.offsetAxis === 'z') {
                 origin.z = modelCenter.z + mapping.offsetSign * modelSize.z * 2;
               } else {
                 origin.x = modelCenter.x + mapping.offsetSign * modelSize.x * 2;
               }
-
               raycaster.set(origin, mapping.rayDir);
               let hits = raycaster.intersectObject(model, true);
 
-              // 如果主方向没命中，尝试反方向
+              // 反方向尝试
               if (hits.length === 0) {
-                const reverseDir = mapping.rayDir.clone().negate();
                 const reverseOrigin = origin.clone();
                 if (mapping.offsetAxis === 'z') {
                   reverseOrigin.z = modelCenter.z - mapping.offsetSign * modelSize.z * 2;
                 } else {
                   reverseOrigin.x = modelCenter.x - mapping.offsetSign * modelSize.x * 2;
                 }
-                raycaster.set(reverseOrigin, reverseDir);
+                raycaster.set(reverseOrigin, mapping.rayDir.clone().negate());
                 hits = raycaster.intersectObject(model, true);
               }
 
+              let finalPos: THREE.Vector3;
               if (hits.length > 0) {
-                const pos = hits[0].point;
-                const geo = new THREE.SphereGeometry(0.05, 8, 8);
-                const mat = new THREE.MeshBasicMaterial({ color: regionColors[region] || 0x00ff00 });
-                const mesh = new THREE.Mesh(geo, mat);
-                mesh.position.copy(pos);
-                mesh.userData = { region, row: pt.row, col: pt.col };
-                markerGroup.add(mesh);
-                newSensors.push({
-                  pos: [pos.x, pos.y, pos.z],
-                  region,
-                  row: pt.row,
-                  col: pt.col,
-                  mesh
-                });
-                hitCount++;
+                finalPos = hits[0].point.clone();
+              } else {
+                // 射线未命中：找最近的模型顶点
+                const target = new THREE.Vector3(worldX, worldY, modelCenter.z);
+                let minDist = Infinity;
+                let closest = target.clone();
+                for (const v of modelVertices) {
+                  const d = v.distanceTo(target);
+                  if (d < minDist) {
+                    minDist = d;
+                    closest = v.clone();
+                  }
+                }
+                finalPos = closest;
               }
+
+              const geo = new THREE.SphereGeometry(0.05, 8, 8);
+              const mat = new THREE.MeshBasicMaterial({ color: regionColors[region] || 0x00ff00 });
+              const mesh = new THREE.Mesh(geo, mat);
+              mesh.position.copy(finalPos);
+              mesh.userData = { region, row: pt.row, col: pt.col };
+              markerGroup.add(mesh);
+              newSensors.push({
+                pos: [finalPos.x, finalPos.y, finalPos.z],
+                region,
+                row: pt.row,
+                col: pt.col,
+                mesh
+              });
+              hitCount++;
             }
           }
 
-          setSensors(prev => [...prev, ...newSensors]);
+                    setSensors(prev => [...prev, ...newSensors]);
           setStatus(`导入完成: ${hitCount}/${totalCount} 个点贴敷成功 (${Object.keys(data).join(', ')})`);
         } catch (err: any) {
           setStatus('导入失败: ' + err.message);
