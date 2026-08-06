@@ -336,7 +336,7 @@ export default function SensorMapper() {
   const annotationDefinitions = useRef<Record<string, AnnotationDefinition>>(BODY_ANNOTATIONS);
   const cameraFlight = useRef<CameraFlight | null>(null);
   const modelLoadGeneration = useRef(0);
-  const [sensors, setSensors] = useState<{id:number, pos:[number,number,number], region:string}[]>([]);
+  const [sensors, setSensors] = useState<{id:number, pos:[number,number,number], region:string, mesh?:any, row?:number, col?:number}[]>([]);
   const [mode, setMode] = useState<'click'|'grid'>('click');
   const [region, setRegion] = useState('palm');
   const [gridRows, setGridRows] = useState(6);
@@ -1036,7 +1036,52 @@ export default function SensorMapper() {
   }, [sensors]);
 
 
-  // 导入传感器坐标 JSON（连体衣点位坐标格式）
+  // 区域整体变换（缩放/平移）
+  const transformRegion = useCallback((action: string, value: number) => {
+    const { markerGroup } = sceneRef.current;
+    const regionSelect = document.getElementById('transformRegion') as HTMLSelectElement;
+    const targetRegion = regionSelect?.value || 'all';
+
+    // 收集目标区域的所有 mesh
+    const targets: THREE.Mesh[] = [];
+    markerGroup.children.forEach((child: any) => {
+      if (targetRegion === 'all' || child.userData?.region === targetRegion) {
+        targets.push(child);
+      }
+    });
+
+    if (targets.length === 0) return;
+
+    if (action === 'scale') {
+      // 以区域中心为原点缩放
+      const center = new THREE.Vector3();
+      targets.forEach(m => center.add(m.position));
+      center.divideScalar(targets.length);
+
+      targets.forEach(m => {
+        const offset = m.position.clone().sub(center);
+        offset.multiplyScalar(value);
+        m.position.copy(center.clone().add(offset));
+      });
+      setStatus(`${targetRegion}: 缩放 ${value > 1 ? '放大' : '缩小'} (${targets.length} 个点)`);
+    } else if (action.startsWith('move')) {
+      const axis = action.replace('move', '').toLowerCase() as 'x' | 'y' | 'z';
+      targets.forEach(m => {
+        m.position[axis] += value;
+      });
+      setStatus(`${targetRegion}: ${axis.toUpperCase()} 平移 ${value > 0 ? '+' : ''}${value.toFixed(1)} (${targets.length} 个点)`);
+    }
+
+    // 同步更新 sensors 数组
+    setSensors(prev => prev.map(s => {
+      if (s.mesh && targets.includes(s.mesh)) {
+        return { ...s, pos: [s.mesh.position.x, s.mesh.position.y, s.mesh.position.z] };
+      }
+      return s;
+    }));
+  }, []);
+
+    // 导入传感器坐标 JSON（连体衣点位坐标格式）
   const importJSON = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -1293,6 +1338,29 @@ export default function SensorMapper() {
         </button>
       </div>
 
+      {/* 区域变换控制面板 */}
+      {sensors.length > 0 && (
+        <div className="px-4 py-2 bg-[#0d0d1a] border-b border-white/5 shrink-0 flex items-center gap-3 text-xs">
+          <span className="text-slate-400">区域变换:</span>
+          <select id="transformRegion" className="px-1 py-0.5 rounded bg-slate-700 border border-white/10 text-xs">
+            <option value="all">全部</option>
+            <option value="前胸">前胸</option>
+            <option value="后背">后背</option>
+            <option value="右手臂">右手臂</option>
+            <option value="前裤">前裤</option>
+          </select>
+          <span className="text-slate-500">缩放:</span>
+          <button onClick={() => transformRegion('scale', 0.9)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">-</button>
+          <button onClick={() => transformRegion('scale', 1.1)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">+</button>
+          <span className="text-slate-500">平移:</span>
+          <button onClick={() => transformRegion('moveX', -0.1)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">X-</button>
+          <button onClick={() => transformRegion('moveX', 0.1)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">X+</button>
+          <button onClick={() => transformRegion('moveY', -0.1)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">Y-</button>
+          <button onClick={() => transformRegion('moveY', 0.1)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">Y+</button>
+          <button onClick={() => transformRegion('moveZ', -0.1)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">Z-</button>
+          <button onClick={() => transformRegion('moveZ', 0.1)} className="px-1.5 py-0.5 rounded bg-slate-600 hover:bg-slate-500">Z+</button>
+        </div>
+      )}
       {/* 状态栏 */}
       <div
         className="px-4 py-1 text-xs text-slate-400 bg-[#12121f] border-b border-white/5 shrink-0"
