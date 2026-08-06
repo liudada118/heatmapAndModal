@@ -17,9 +17,67 @@ const BODY_BOUNDS: Record<string, {xMin:number, xMax:number, yMin:number, yMax:n
   pinky:  { xMin: 0.00, xMax: 0.20, yMin: 0.35, yMax: 0.55, dir: 'front' },
 };
 
+// 部位标注点配置：3D 位置（归一化）、摄像机目标视角
+const BODY_ANNOTATIONS: Record<string, {
+  pos: [number, number, number],   // 标注点在模型表面的位置（归一化 0~1）
+  labelOffset: [number, number, number], // 引导线末端偏移
+  camera: { pos: [number, number, number], target: [number, number, number] }, // 摄像机飞行目标
+  label: string
+}> = {
+  back:   { pos: [0.5, 0.65, -0.3], labelOffset: [1.5, 0.8, -1.0], camera: { pos: [0, 1, -6], target: [0, 1, 0] }, label: '背部' },
+  chest:  { pos: [0.5, 0.65, 0.3],  labelOffset: [1.5, 0.8, 1.0],  camera: { pos: [0, 1, 6], target: [0, 1, 0] }, label: '胸部' },
+  arm:    { pos: [0.15, 0.6, 0.0],  labelOffset: [-1.5, 1.0, 0.5], camera: { pos: [-5, 1.5, 3], target: [-1, 1, 0] }, label: '手臂' },
+  leg:    { pos: [0.4, 0.25, 0.2],  labelOffset: [1.2, -0.5, 1.5], camera: { pos: [2, -1, 5], target: [0, -1, 0] }, label: '腿部' },
+  palm:   { pos: [0.85, 0.45, 0.1], labelOffset: [1.8, 0.3, 0.8],  camera: { pos: [4, 0.5, 3], target: [2, 0, 0] }, label: '手掌' },
+};
+
+
+function createAnnotationMarker(scene: THREE.Scene, worldPos: THREE.Vector3, endPos: THREE.Vector3, label: string, onClick: () => void) {
+  const group = new THREE.Group();
+  group.userData = { isAnnotation: true, label, onClick };
+
+  // 引导线（从模型表面到标注点）
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([worldPos, endPos]);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.6 });
+  const line = new THREE.Line(lineGeo, lineMat);
+  group.add(line);
+
+  // 光圈（环形）
+  const ringGeo = new THREE.RingGeometry(0.12, 0.16, 32);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.position.copy(endPos);
+  ring.lookAt(scene.position); // 面向摄像机
+  group.add(ring);
+
+  // 外圈脉冲环
+  const pulseGeo = new THREE.RingGeometry(0.18, 0.20, 32);
+  const pulseMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
+  const pulse = new THREE.Mesh(pulseGeo, pulseMat);
+  pulse.position.copy(endPos);
+  pulse.lookAt(scene.position);
+  pulse.userData = { isPulse: true, baseScale: 1.0 };
+  group.add(pulse);
+
+  // 中心点（可点击的球体）
+  const dotGeo = new THREE.SphereGeometry(0.08, 16, 16);
+  const dotMat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
+  const dot = new THREE.Mesh(dotGeo, dotMat);
+  dot.position.copy(endPos);
+  dot.userData = { clickable: true, onClick };
+  group.add(dot);
+
+  scene.add(group);
+  return group;
+}
+
+
 export default function SensorMapper() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<any>({});
+  const annotationGroups = useRef<THREE.Group[]>([]);
+  const animatingCamera = useRef(false);
+  const createAnnotationsRef = useRef<any>(null);
   const [sensors, setSensors] = useState<{id:number, pos:[number,number,number], region:string}[]>([]);
   const [mode, setMode] = useState<'click'|'grid'>('click');
   const [region, setRegion] = useState('palm');
@@ -36,6 +94,54 @@ export default function SensorMapper() {
   const [matrixSpacing, setMatrixSpacing] = useState(0.5);
   const sensorsRef = useRef(sensors);
   sensorsRef.current = sensors;
+
+  // 摄像机飞行动画
+  const flyToView = useCallback((targetPos: [number,number,number], lookAt: [number,number,number]) => {
+    if (!sceneRef.current.camera || !sceneRef.current.controls) return;
+    const camera = sceneRef.current.camera;
+    const controls = sceneRef.current.controls;
+    animatingCamera.current = true;
+    const startPos = camera.position.clone();
+    const startTarget = controls.target.clone();
+    const endPos = new THREE.Vector3(...targetPos);
+    const endTarget = new THREE.Vector3(...lookAt);
+    const startTime = Date.now();
+    const duration = 1200;
+    const animate = () => {
+      const t = Math.min(1, (Date.now() - startTime) / duration);
+      const ease = 1 - Math.pow(1 - t, 3);
+      camera.position.lerpVectors(startPos, endPos, ease);
+      controls.target.lerpVectors(startTarget, endTarget, ease);
+      controls.update();
+      if (t < 1) requestAnimationFrame(animate);
+      else animatingCamera.current = false;
+    };
+    animate();
+  }, []);
+
+  // 创建部位标注点
+  const createAnnotations = useCallback((scene: THREE.Scene, box: THREE.Box3, _model: THREE.Object3D) => {
+    annotationGroups.current.forEach(g => scene.remove(g));
+    annotationGroups.current = [];
+    const size = box.getSize(new THREE.Vector3());
+    const min = box.min;
+    Object.entries(BODY_ANNOTATIONS).forEach(([key, cfg]) => {
+      const worldPos = new THREE.Vector3(
+        min.x + size.x * cfg.pos[0],
+        min.y + size.y * cfg.pos[1],
+        min.z + size.z * (cfg.pos[2] + 0.5)
+      );
+      const endPos = worldPos.clone().add(new THREE.Vector3(...cfg.labelOffset));
+      const group = createAnnotationMarker(scene, worldPos, endPos, cfg.label, () => {
+        flyToView(cfg.camera.pos, cfg.camera.target);
+        setRegion(key);
+        setStatus('切换到: ' + cfg.label + ' 视角');
+      });
+      annotationGroups.current.push(group);
+    });
+  }, [flyToView]);
+  createAnnotationsRef.current = createAnnotations;
+
 
   // 初始化 Three.js 场景
   useEffect(() => {
@@ -139,6 +245,11 @@ export default function SensorMapper() {
 
         scene.add(model);
         sceneRef.current.model = model;
+        // 创建部位标注动画
+        setTimeout(() => {
+          const newBox = new THREE.Box3().setFromObject(model);
+          createAnnotationsRef.current?.(scene, newBox, model);
+        }, 200);
         setModelLoaded(true);
         setStatus(`模型已加载: ${file.name} (${(size.x*s).toFixed(1)}×${(size.y*s).toFixed(1)}×${(size.z*s).toFixed(1)})`);
         URL.revokeObjectURL(url);
@@ -181,6 +292,11 @@ export default function SensorMapper() {
         });
         scene.add(model);
         sceneRef.current.model = model;
+        // 创建部位标注动画
+        setTimeout(() => {
+          const newBox = new THREE.Box3().setFromObject(model);
+          createAnnotationsRef.current?.(scene, newBox, model);
+        }, 200);
         setModelLoaded(true);
         setStatus('模型已加载: ' + name + ' (' + (size.x*s).toFixed(1) + '×' + (size.y*s).toFixed(1) + '×' + (size.z*s).toFixed(1) + ')');
       });
@@ -254,6 +370,15 @@ export default function SensorMapper() {
     );
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, sceneRef.current.camera);
+    // 先检测标注点点击
+    const allAnnotationMeshes: THREE.Object3D[] = [];
+    annotationGroups.current.forEach((g: any) => g.traverse((c: any) => { if (c.userData?.clickable) allAnnotationMeshes.push(c); }));
+    const annotHits = raycaster.intersectObjects(allAnnotationMeshes, false);
+    if (annotHits.length > 0) {
+      const clicked = annotHits[0].object;
+      if (clicked.userData?.onClick) clicked.userData.onClick();
+      return;
+    }
     const hits = raycaster.intersectObject(sceneRef.current.model, true);
     if (hits.length > 0) {
       if (matrixMode) {
