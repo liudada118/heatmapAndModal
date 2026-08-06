@@ -1081,6 +1081,100 @@ export default function SensorMapper() {
     }));
   }, []);
 
+    // ============ 四角控制点变形 ============
+  const cornerMarkersRef = useRef<THREE.Mesh[]>([]);
+  const [quadMode, setQuadMode] = useState(false);
+  const [activeCorner, setActiveCorner] = useState<number | null>(null);
+
+  // 创建/更新四个角点控制球
+  const createCornerMarkers = useCallback((region: string) => {
+    const { markerGroup, scene } = sceneRef.current;
+    // 移除旧的角点标记
+    cornerMarkersRef.current.forEach(m => scene.remove(m));
+    cornerMarkersRef.current = [];
+
+    // 找到该区域的所有点
+    const regionPts: THREE.Mesh[] = [];
+    markerGroup.children.forEach((child: any) => {
+      if (child.userData?.region === region) regionPts.push(child);
+    });
+    if (regionPts.length < 4) return;
+
+    // 计算包围盒的四个角
+    const positions = regionPts.map(m => m.position.clone());
+    const bbox = new THREE.Box3();
+    positions.forEach(p => bbox.expandByPoint(p));
+
+    const corners = [
+      new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.min.z), // 左上
+      new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), // 右上
+      new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), // 左下
+      new THREE.Vector3(bbox.max.x, bbox.min.y, bbox.max.z), // 右下
+    ];
+
+    const colors = [0xff0000, 0x00ff00, 0x0000ff, 0xffff00]; // 红绿蓝黄
+    corners.forEach((pos, i) => {
+      const geo = new THREE.SphereGeometry(0.15, 16, 16);
+      const mat = new THREE.MeshBasicMaterial({ color: colors[i], transparent: true, opacity: 0.9 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(pos);
+      mesh.userData = { isCorner: true, cornerIndex: i, region };
+      scene.add(mesh);
+      cornerMarkersRef.current.push(mesh);
+    });
+
+    setStatus(`四角控制模式: ${region} (拖拽红/绿/蓝/黄角点变形)`);
+  }, []);
+
+  // 双线性插值：根据四个角点位置重新计算所有中间点
+  const applyQuadTransform = useCallback((region: string) => {
+    const { markerGroup } = sceneRef.current;
+    const corners = cornerMarkersRef.current;
+    if (corners.length !== 4) return;
+
+    // 四个角点的当前位置
+    const tl = corners[0].position; // 左上
+    const tr = corners[1].position; // 右上
+    const bl = corners[2].position; // 左下
+    const br = corners[3].position; // 右下
+
+    // 找到该区域的所有点，按 row/col 排序
+    const regionPts: {mesh: THREE.Mesh, row: number, col: number}[] = [];
+    markerGroup.children.forEach((child: any) => {
+      if (child.userData?.region === region && child.userData?.row != null) {
+        regionPts.push({ mesh: child, row: child.userData.row, col: child.userData.col });
+      }
+    });
+    if (regionPts.length === 0) return;
+
+    // 计算行列范围
+    const rows = regionPts.map(p => p.row);
+    const cols = regionPts.map(p => p.col);
+    const minRow = Math.min(...rows), maxRow = Math.max(...rows);
+    const minCol = Math.min(...cols), maxCol = Math.max(...cols);
+
+    // 双线性插值
+    regionPts.forEach(({ mesh, row, col }) => {
+      const u = (col - minCol) / (maxCol - minCol || 1); // 0~1 水平
+      const v = (row - minRow) / (maxRow - minRow || 1); // 0~1 垂直（row 小=上）
+
+      // 双线性插值公式
+      const top = tl.clone().lerp(tr.clone(), u);
+      const bottom = bl.clone().lerp(br.clone(), u);
+      const pos = top.clone().lerp(bottom, v);
+
+      mesh.position.copy(pos);
+    });
+
+    // 同步 sensors
+    setSensors(prev => prev.map(s => {
+      if (s.mesh && s.region === region) {
+        return { ...s, pos: [s.mesh.position.x, s.mesh.position.y, s.mesh.position.z] as [number,number,number] };
+      }
+      return s;
+    }));
+  }, []);
+
     // 导入传感器坐标 JSON（连体衣点位坐标格式）
   const importJSON = useCallback(() => {
     const input = document.createElement('input');
