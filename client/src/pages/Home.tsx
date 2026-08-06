@@ -585,229 +585,218 @@ function Panel({title,subtitle,badge,badgeColor,children,highlight,tag}:{title:s
 }
 
 
-// ─── 人体模型 + 高斯衰减热力图贴图 ─────────────────────────────────────────
-function HumanBodyPanel() {
+// ─── 人体模型 UV 贴图方式 ─────────────────────────────────────────────────────
+function HumanTexturePanel() {
   const containerRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     const W = container.offsetWidth, H = container.offsetHeight;
     if (!W || !H) return;
 
-    // Three.js 场景
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x10152b);
     const camera = new THREE.PerspectiveCamera(40, W / H, 0.1, 1000);
-    camera.position.set(0, 30, -10);
-    camera.lookAt(0, 26, 0);
-
+    camera.position.set(0, 0, 15);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(W, H);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
-    // 灯光
-    const coords = [80, 0, -80];
-    for (const x of coords) for (const y of coords) for (const z of coords) {
-      const pl = new THREE.PointLight(0xffffff, 0.22, 600);
-      pl.position.set(x, y, z);
-      scene.add(pl);
-    }
-
-    // 控制器
-    const { OrbitControls } = (window as any).__threeOrbitControls || {};
     let controls: any = null;
     import('three/examples/jsm/controls/OrbitControls.js').then(mod => {
       controls = new mod.OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, 26, 0);
+      controls.enableDamping = true;
       controls.update();
     });
 
-    // 生成热力图纹理（高斯衰减版）
-    const TEX_SIZE = 400;
+    // 灯光
+    const ambient = new THREE.AmbientLight(0xffffff, 0.3);
+    scene.add(ambient);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(5, 10, 7);
+    scene.add(dir);
+
+    // 生成热力图纹理（Canvas 2D 方式）
+    const TEX = 512;
     const texCanvas = document.createElement('canvas');
-    texCanvas.width = TEX_SIZE; texCanvas.height = TEX_SIZE;
+    texCanvas.width = TEX; texCanvas.height = TEX;
     const texCtx = texCanvas.getContext('2d')!;
-    texCtx.fillStyle = '#aaaaaa';
-    texCtx.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
 
-    // 用 Canvas 2D + LUT 颜色映射生成热力图贴图（高斯衰减方式）
-    function generateHeatmapTexture() {
-      // 创建 LUT
-      const lutCanvas = document.createElement('canvas');
-      lutCanvas.width = 256; lutCanvas.height = 1;
-      const lutCtx = lutCanvas.getContext('2d')!;
-      const g = lutCtx.createLinearGradient(0, 0, 256, 0);
-      g.addColorStop(0, 'rgba(21,18,42,1)');
-      g.addColorStop(0.40, 'rgba(62,0,248,1)');
-      g.addColorStop(0.55, 'rgba(149,253,237,1)');
-      g.addColorStop(0.70, 'rgba(154,255,62,1)');
-      g.addColorStop(0.85, 'rgba(246,254,71,1)');
-      g.addColorStop(1, 'rgba(216,36,36,1)');
-      lutCtx.fillStyle = g; lutCtx.fillRect(0, 0, 256, 1);
-      const pal = lutCtx.getImageData(0, 0, 256, 1).data;
+    // LUT
+    const lutCanvas = document.createElement('canvas');
+    lutCanvas.width = 256; lutCanvas.height = 1;
+    const lutCtx = lutCanvas.getContext('2d')!;
+    const g = lutCtx.createLinearGradient(0, 0, 256, 0);
+    g.addColorStop(0, 'rgba(21,18,42,1)');
+    g.addColorStop(0.40, 'rgba(62,0,248,1)');
+    g.addColorStop(0.55, 'rgba(149,253,237,1)');
+    g.addColorStop(0.70, 'rgba(154,255,62,1)');
+    g.addColorStop(0.85, 'rgba(246,254,71,1)');
+    g.addColorStop(1, 'rgba(216,36,36,1)');
+    lutCtx.fillStyle = g; lutCtx.fillRect(0, 0, 256, 1);
+    const pal = lutCtx.getImageData(0, 0, 256, 1).data;
 
-      // 为每个身体部位生成热力图 tile
-      const TILE = 128;
-      const tileCanvas = document.createElement('canvas');
-      tileCanvas.width = TILE; tileCanvas.height = TILE;
-      const tileCtx = tileCanvas.getContext('2d')!;
-
-      // UV 区域定义（和 humanBody.jsx 一致）
-      const cellSize = TEX_SIZE / 64;
-      const uvRegions = [
-        { x: 4*cellSize, y: 6*cellSize, w: 17*cellSize, h: 18*cellSize },   // back
-        { x: 4*cellSize, y: 40*cellSize, w: 17*cellSize, h: 20*cellSize },  // chest
-        { x: 17*cellSize, y: 28*cellSize, w: 19*cellSize, h: 5*cellSize },  // rightArm
-        { x: 32*cellSize, y: 28*cellSize, w: 8*cellSize, h: 5*cellSize },   // rightShoulder
-        { x: 45*cellSize, y: 28*cellSize, w: 18*cellSize, h: 5*cellSize },  // leftArm
-        { x: 40*cellSize, y: 28*cellSize, w: 8*cellSize, h: 5*cellSize },   // leftShoulder
-        { x: 31*cellSize, y: 1*cellSize, w: 11*cellSize, h: 23*cellSize },  // backPantsLeft
-        { x: 44*cellSize, y: 1*cellSize, w: 10*cellSize, h: 23*cellSize },  // backPantsRight
-        { x: 31*cellSize, y: 30*cellSize, w: 11*cellSize, h: 34*cellSize }, // frontPantsLeft
-        { x: 44*cellSize, y: 30*cellSize, w: 10*cellSize, h: 34*cellSize }, // frontPantsRight
-      ];
-
-      // 部位数据尺寸
-      const partSizes = [
-        { w: 10, h: 6 },  // back
-        { w: 10, h: 6 },  // chest
-        { w: 7, h: 6 },   // rightArm
-        { w: 3, h: 6 },   // rightShoulder
-        { w: 7, h: 6 },   // leftArm
-        { w: 3, h: 6 },   // leftShoulder
-        { w: 5, h: 8 },   // backPantsLeft
-        { w: 5, h: 8 },   // backPantsRight
-        { w: 5, h: 8 },   // frontPantsLeft
-        { w: 5, h: 8 },   // frontPantsRight
-      ];
-
-      texCtx.fillStyle = '#aaaaaa';
-      texCtx.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
-
-      for (let p = 0; p < uvRegions.length; p++) {
-        const ps = partSizes[p];
-        const region = uvRegions[p];
-
-        // 生成随机热力数据（模拟传感器）
-        const data: number[] = [];
-        for (let i = 0; i < ps.w * ps.h; i++) {
-          data.push(Math.random() * 150 * (0.3 + Math.random() * 0.7));
-        }
-
-        // 在 tile canvas 上用高斯衰减渲染
-        tileCtx.clearRect(0, 0, TILE, TILE);
-        const R = Math.max(8, TILE / ps.w * 0.9);
-        const BL = R * 0.5;
-        const cc = document.createElement('canvas');
-        cc.width = (R + BL) * 2; cc.height = (R + BL) * 2;
-        const cCtx = cc.getContext('2d')!;
-        cCtx.shadowBlur = BL; cCtx.shadowColor = 'black';
-        cCtx.shadowOffsetX = cCtx.shadowOffsetY = 10000;
-        cCtx.beginPath(); cCtx.arc((R+BL)-10000, (R+BL)-10000, R, 0, Math.PI*2); cCtx.fill();
-
-        for (let row = 0; row < ps.h; row++) {
-          for (let col = 0; col < ps.w; col++) {
-            const v = data[row * ps.w + col];
-            if (v <= 0) continue;
-            const a = Math.min(1, v / 170);
-            tileCtx.globalAlpha = a;
-            const cx = col * TILE / ps.w + TILE / ps.w / 2;
-            const cy = row * TILE / ps.h + TILE / ps.h / 2;
-            tileCtx.drawImage(cc, cx - (R+BL), cy - (R+BL));
-          }
-        }
-        tileCtx.globalAlpha = 1;
-
-        // 颜色映射
-        const id = tileCtx.getImageData(0, 0, TILE, TILE);
-        const px = id.data;
-        for (let i = 3; i < px.length; i += 4) {
-          const a = px[i];
-          if (a > 0) {
-            const idx = Math.min(255, a) * 4;
-            px[i-3] = pal[idx]; px[i-2] = pal[idx+1]; px[i-1] = pal[idx+2];
-            px[i] = Math.round(a * 0.92);
-          }
-        }
-        tileCtx.putImageData(id, 0, 0);
-
-        // 绘制到 UV 纹理
-        texCtx.drawImage(tileCanvas, 0, 0, TILE, TILE, region.x, region.y, region.w, region.h);
+    function genTexture() {
+      const GRID = 32;
+      const off = document.createElement('canvas');
+      off.width = TEX; off.height = TEX;
+      const oc = off.getContext('2d')!;
+      oc.clearRect(0, 0, TEX, TEX);
+      const R = TEX / GRID * 0.8, BL = R * 0.5, R2 = R + BL;
+      const cc = document.createElement('canvas');
+      cc.width = R2*2; cc.height = R2*2;
+      const cCtx = cc.getContext('2d')!;
+      cCtx.shadowBlur = BL; cCtx.shadowColor = 'black';
+      cCtx.shadowOffsetX = cCtx.shadowOffsetY = 10000;
+      cCtx.beginPath(); cCtx.arc(R2-10000, R2-10000, R, 0, Math.PI*2); cCtx.fill();
+      for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) {
+        const v = Math.random() > 0.4 ? Math.random() * 170 : 0;
+        if (v <= 0) continue;
+        oc.globalAlpha = Math.min(1, v / 170);
+        oc.drawImage(cc, c*TEX/GRID + TEX/GRID/2 - R2, r*TEX/GRID + TEX/GRID/2 - R2);
       }
+      oc.globalAlpha = 1;
+      const id = oc.getImageData(0, 0, TEX, TEX);
+      const px = id.data;
+      for (let i = 3; i < px.length; i += 4) {
+        const a = px[i];
+        if (a > 0) { const idx = Math.min(255,a)*4; px[i-3]=pal[idx]; px[i-2]=pal[idx+1]; px[i-1]=pal[idx+2]; px[i]=255; }
+        else { px[i-3]=170; px[i-2]=170; px[i-1]=170; px[i]=255; }
+      }
+      texCtx.putImageData(id, 0, 0);
     }
-
-    generateHeatmapTexture();
+    genTexture();
 
     const texture = new THREE.CanvasTexture(texCanvas);
     texture.flipY = false;
     texture.colorSpace = THREE.SRGBColorSpace;
-    texture.wrapS = THREE.ClampToEdgeWrapping;
-    texture.wrapT = THREE.ClampToEdgeWrapping;
 
-    // 加载 GLB 模型
     import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
       const loader = new GLTFLoader();
       loader.load('/manus-storage/human3_667b8ceb.glb', (gltf) => {
-        const model = gltf.scene;
-        model.position.set(0, 26, -9.5);
-        model.rotation.set(
-          THREE.MathUtils.degToRad(-140),
-          THREE.MathUtils.degToRad(0),
-          THREE.MathUtils.degToRad(-180)
-        );
-        scene.add(model);
-
-        // 贴图
-        model.traverse((child: any) => {
-          if (!child.isMesh) return;
-          const applyTex = (mat: any) => {
-            mat.map = texture;
-            if ('metalness' in mat) mat.metalness = 0;
-            if ('roughness' in mat) mat.roughness = 1;
-            mat.needsUpdate = true;
-          };
-          if (Array.isArray(child.material)) {
-            child.material.forEach(applyTex);
-          } else {
-            applyTex(child.material);
-          }
-        });
-
-        // 更新相机对准模型
-        const box = new THREE.Box3().setFromObject(model);
+        const mdl = gltf.scene;
+        const box = new THREE.Box3().setFromObject(mdl);
+        const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
-        camera.lookAt(center);
-        if (controls) { controls.target.copy(center); controls.update(); }
-
-        // 定时更新热力图
-        setInterval(() => {
-          generateHeatmapTexture();
-          texture.needsUpdate = true;
-        }, 2000);
+        const s = 7.0 / (Math.max(size.x, size.y, size.z) || 1);
+        mdl.scale.setScalar(s);
+        mdl.position.set(-center.x*s, -center.y*s, -center.z*s);
+        scene.add(mdl);
+        mdl.traverse((child: any) => {
+          if (!child.isMesh) return;
+          const mat = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.8, metalness: 0 });
+          child.material = mat;
+        });
+        setInterval(() => { genTexture(); texture.needsUpdate = true; }, 2000);
       });
     });
 
-    // 动画循环
     let raf = 0;
-    const animate = () => {
-      raf = requestAnimationFrame(animate);
-      if (controls) controls.update();
-      renderer.render(scene, camera);
-    };
+    const animate = () => { raf = requestAnimationFrame(animate); if(controls) controls.update(); renderer.render(scene, camera); };
     animate();
-
-    return () => {
-      cancelAnimationFrame(raf);
-      renderer.dispose();
-      container.removeChild(renderer.domElement);
-    };
+    return () => { cancelAnimationFrame(raf); renderer.dispose(); container.removeChild(renderer.domElement); };
   }, []);
-
   return <div ref={containerRef} style={{width:'100%',height:'100%'}} />;
 }
+
+// ─── 手套模型 顶点颜色方式 ─────────────────────────────────────────────────────
+function GloveVertexPanel() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const W = container.offsetWidth, H = container.offsetHeight;
+    if (!W || !H) return;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x061018);
+    const camera = new THREE.PerspectiveCamera(45, W / H, 0.01, 100);
+    camera.position.set(0, 0, 12);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(W, H);
+    container.appendChild(renderer.domElement);
+
+    let controls: any = null;
+    import('three/examples/jsm/controls/OrbitControls.js').then(mod => {
+      controls = new mod.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.update();
+    });
+
+    const BASE_COLOR = new THREE.Color(0x073c46);
+    const CYAN = new THREE.Color(0x00fff7);
+    const YELLOW = new THREE.Color(0xffe66d);
+    const RED = new THREE.Color(0xff2f2f);
+
+    function setPressureColor(attr: THREE.BufferAttribute, vi: number, value: number) {
+      const t = Math.max(0, Math.min(1, value / 255));
+      if (t <= 0.01) { attr.setXYZ(vi, BASE_COLOR.r, BASE_COLOR.g, BASE_COLOR.b); return; }
+      const c = CYAN.clone();
+      if (t < 0.55) { c.lerp(YELLOW, t / 0.55); } else { c.copy(YELLOW).lerp(RED, (t - 0.55) / 0.45); }
+      attr.setXYZ(vi, c.r, c.g, c.b);
+    }
+
+    let colorAttr: THREE.BufferAttribute | null = null;
+    let vertexCount = 0;
+
+    import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
+      const loader = new GLTFLoader();
+      loader.load('/manus-storage/hand_glove_3783d53e.glb', (gltf) => {
+        const mdl = gltf.scene;
+        const box = new THREE.Box3().setFromObject(mdl);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const s = 7.4 / (Math.max(size.x, size.y, size.z) || 1);
+        mdl.scale.setScalar(s);
+        mdl.rotation.set(0.2, -0.42, 2.28);
+        mdl.position.set(0, 0, 0);
+        mdl.updateMatrixWorld(true);
+        const pivotY = box.min.y + size.y * 0.88;
+        const pivot = new THREE.Vector3(center.x, pivotY, center.z);
+        const pivotWorld = pivot.clone().applyMatrix4(mdl.matrixWorld);
+        mdl.position.sub(pivotWorld);
+        scene.add(mdl);
+
+        mdl.traverse((child: any) => {
+          if (!child.isMesh) return;
+          child.frustumCulled = false;
+          const geo = child.geometry;
+          const pos = geo.attributes.position;
+          if (!pos) return;
+          const colors = new Float32Array(pos.count * 3);
+          for (let i = 0; i < pos.count; i++) { colors[i*3]=BASE_COLOR.r; colors[i*3+1]=BASE_COLOR.g; colors[i*3+2]=BASE_COLOR.b; }
+          geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+          colorAttr = geo.attributes.color as THREE.BufferAttribute;
+          vertexCount = pos.count;
+          child.material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, toneMapped: false });
+        });
+        randomize();
+      });
+    });
+
+    function randomize() {
+      if (!colorAttr || !vertexCount) return;
+      for (let i = 0; i < vertexCount; i++) {
+        const v = Math.random() > 0.6 ? Math.random() * 255 : Math.random() * 50;
+        setPressureColor(colorAttr, i, v);
+      }
+      colorAttr.needsUpdate = true;
+    }
+    const interval = setInterval(randomize, 1500);
+
+    let raf = 0;
+    const animate = () => { raf = requestAnimationFrame(animate); if(controls) controls.update(); renderer.render(scene, camera); };
+    animate();
+    return () => { clearInterval(interval); cancelAnimationFrame(raf); renderer.dispose(); container.removeChild(renderer.domElement); };
+  }, []);
+  return <div ref={containerRef} style={{width:'100%',height:'100%'}} />;
+}
+
+
 
 // ─── 主页面 ──────────────────────────────────────────────────────────────────
 export default function Home() {
@@ -857,21 +846,39 @@ export default function Home() {
           </Panel>
         </div>
 
-        {/* 人体模型 + 高斯衰减热力图贴图 */}
-        <div className="col-span-2 rounded-2xl border border-amber-500/20 overflow-hidden" style={{background:'rgba(15,23,42,0.7)'}}>
+        {/* 人体模型 UV 贴图 */}
+        <div className="rounded-2xl border border-amber-500/20 overflow-hidden" style={{background:'rgba(15,23,42,0.7)'}}>
           <div className="p-4 pb-0">
             <div className="flex justify-between items-center mb-2">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-amber-500" />
-                <span className="font-semibold text-[15px]">人体模型 · 高斯衰减贴图</span>
+                <span className="font-semibold text-[15px]">人体 · UV 纹理贴图</span>
                 <span className="text-[9px] bg-amber-500/20 text-amber-500 px-1.5 py-0.5 rounded font-mono">NEW</span>
               </div>
-              <span className="text-[11px] font-mono text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-md">GLB + Canvas LUT</span>
+              <span className="text-[11px] font-mono text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-md">GLB + CanvasTexture</span>
             </div>
-            <p className="text-[11px] text-slate-500 font-mono mb-3">human3.glb · UV 贴图 · Canvas 2D 高斯光斑 + 256色 LUT 颜色映射 · 每 2s 随机更新</p>
+            <p className="text-[11px] text-slate-500 font-mono mb-3">human3.glb · Canvas 2D 热力图 → UV 纹理 · 每 2s 更新</p>
           </div>
-          <div style={{height:450}}>
-            <HumanBodyPanel />
+          <div style={{height:400}}>
+            <HumanTexturePanel />
+          </div>
+        </div>
+
+        {/* 手套模型 顶点颜色 */}
+        <div className="rounded-2xl border border-cyan-500/20 overflow-hidden" style={{background:'rgba(15,23,42,0.7)'}}>
+          <div className="p-4 pb-0">
+            <div className="flex justify-between items-center mb-2">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-cyan-400" />
+                <span className="font-semibold text-[15px]">手套 · 顶点颜色</span>
+                <span className="text-[9px] bg-cyan-500/20 text-cyan-400 px-1.5 py-0.5 rounded font-mono">NEW</span>
+              </div>
+              <span className="text-[11px] font-mono text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-md">GLB + Vertex Colors</span>
+            </div>
+            <p className="text-[11px] text-slate-500 font-mono mb-3">hand_glove.glb · 顶点颜色直接映射 · 青→黄→红 · 每 1.5s 更新</p>
+          </div>
+          <div style={{height:400}}>
+            <GloveVertexPanel />
           </div>
         </div>
 
