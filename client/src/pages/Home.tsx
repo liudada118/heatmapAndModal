@@ -1,17 +1,19 @@
 /**
- * TerrainCompare — 四种 Three.js 3D 地形渲染方式对比
- * 使用原生 Three.js（不依赖 R3F），在 useEffect 中直接操控 canvas
- * A: 原版（meshBasicMaterial + 固定归一化）
- * B: 加方向光（meshStandardMaterial + directionalLight × 2）
- * C: 动态归一化 + gamma 拉伸（meshBasicMaterial）
- * D: 全部优化（meshStandardMaterial + 动态归一化 + gamma + 方向光）
+ * 四种渲染技术对比展示
+ * 1. Google Maps HeatmapLayer
+ * 2. Canvas 2D 热力图（移植自 canvas.jsx）
+ * 3. WebGL 2D 热力图（移植自 WebGL.HeatMapcopy2.js）
+ * 4. Three.js 3D 地形（移植自 TerrainMapPage）
  */
-import { useRef, useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { MapView } from '@/components/Map';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ─── 原始 32×32 压力数据 ─────────────────────────────────────────────────────
-const SAMPLE_MATRIX: number[] = [
+// ─── 共享数据：32×32 压力传感器矩阵 ─────────────────────────────────────────
+const GRID = 32;
+const MAX_ADC = 170;
+const MATRIX: number[] = [
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,118,44,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,41,124,105,27,0,0,0,0,43,80,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,76,137,94,0,0,0,12,93,144,95,0,0,0,0,0,0,0,0,
@@ -45,361 +47,458 @@ const SAMPLE_MATRIX: number[] = [
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 ];
-const GRID = 32;
-const MAX_ADC = 170;
-const HEIGHT_SCALE = 4.5;
 
-// ─── 颜色方案 ────────────────────────────────────────────────────────────────
-type Stop = { t: number; r: number; g: number; b: number };
-const STOPS: Stop[] = [
-  { t: 0.0,  r: 0.0,  g: 0.08, b: 0.18 },
-  { t: 0.06, r: 0.0,  g: 0.28, b: 0.52 },
-  { t: 0.14, r: 0.0,  g: 0.55, b: 0.7  },
-  { t: 0.22, r: 0.0,  g: 0.7,  b: 0.55 },
-  { t: 0.32, r: 0.1,  g: 0.78, b: 0.25 },
-  { t: 0.42, r: 0.45, g: 0.82, b: 0.05 },
-  { t: 0.52, r: 0.78, g: 0.75, b: 0.0  },
-  { t: 0.62, r: 0.95, g: 0.6,  b: 0.0  },
-  { t: 0.72, r: 1.0,  g: 0.4,  b: 0.0  },
-  { t: 0.82, r: 1.0,  g: 0.25, b: 0.0  },
-  { t: 1.0,  r: 1.0,  g: 0.08, b: 0.0  },
-];
-function terrainColor(t: number): [number, number, number] {
-  t = Math.max(0, Math.min(1, t));
-  let lo = STOPS[0], hi = STOPS[STOPS.length - 1];
-  for (let i = 0; i < STOPS.length - 1; i++) {
-    if (t >= STOPS[i].t && t <= STOPS[i + 1].t) { lo = STOPS[i]; hi = STOPS[i + 1]; break; }
-  }
-  const f = hi.t > lo.t ? (t - lo.t) / (hi.t - lo.t) : 0;
-  return [lo.r + (hi.r - lo.r) * f, lo.g + (hi.g - lo.g) * f, lo.b + (hi.b - lo.b) * f];
-}
+// 将矩阵数据映射到地理坐标（以上海为中心，0.002度/格）
+const CENTER_LAT = 31.23;
+const CENTER_LNG = 121.47;
+const STEP = 0.0003;
 
-// ─── 双三次插值 ──────────────────────────────────────────────────────────────
-function cubicW(t: number) {
-  const a = -0.5, at = Math.abs(t);
-  if (at <= 1) return (a + 2) * at ** 3 - (a + 3) * at ** 2 + 1;
-  if (at < 2)  return a * at ** 3 - 5 * a * at ** 2 + 8 * a * at - 4 * a;
-  return 0;
-}
-function bicubic(src: number[][], srcN: number, scale: number): number[][] {
-  const dstN = srcN * scale;
-  const dst: number[][] = Array.from({ length: dstN }, () => new Array(dstN).fill(0));
-  for (let oy = 0; oy < dstN; oy++) {
-    for (let ox = 0; ox < dstN; ox++) {
-      const sx = (ox / (dstN - 1)) * (srcN - 1);
-      const sy = (oy / (dstN - 1)) * (srcN - 1);
-      const ix = Math.floor(sx), iy = Math.floor(sy);
-      const fx = sx - ix, fy = sy - iy;
-      let sum = 0, ws = 0;
-      for (let dy = -1; dy <= 2; dy++) {
-        for (let dx = -1; dx <= 2; dx++) {
-          const px = Math.max(0, Math.min(srcN - 1, ix + dx));
-          const py = Math.max(0, Math.min(srcN - 1, iy + dy));
-          const w = cubicW(fx - dx) * cubicW(fy - dy);
-          sum += src[py][px] * w; ws += w;
+// ─── 1. Google Maps 热力图 ───────────────────────────────────────────────────
+function MapHeatmap() {
+  return (
+    <MapView
+      className="w-full h-full"
+      onMapReady={(map: google.maps.Map) => {
+        map.setCenter({ lat: CENTER_LAT, lng: CENTER_LNG });
+        map.setZoom(16);
+        map.setMapTypeId('roadmap');
+
+        const points: google.maps.visualization.WeightedLocation[] = [];
+        for (let row = 0; row < GRID; row++) {
+          for (let col = 0; col < GRID; col++) {
+            const v = MATRIX[row * GRID + col];
+            if (v > 0) {
+              points.push({
+                location: new google.maps.LatLng(
+                  CENTER_LAT + (row - GRID / 2) * STEP,
+                  CENTER_LNG + (col - GRID / 2) * STEP
+                ),
+                weight: v / MAX_ADC,
+              });
+            }
+          }
         }
-      }
-      dst[oy][ox] = Math.max(0, ws > 0 ? sum / ws : 0);
-    }
-  }
-  return dst;
-}
 
-// ─── 高斯模糊 ────────────────────────────────────────────────────────────────
-function gaussBlur(mat: number[][], n: number, sigma: number): number[][] {
-  const size = Math.ceil(sigma * 3) * 2 + 1;
-  const half = Math.floor(size / 2);
-  const k: number[] = Array.from({ length: size }, (_, i) =>
-    Math.exp(-((i - half) ** 2) / (2 * sigma * sigma))
+        new google.maps.visualization.HeatmapLayer({
+          data: points,
+          map,
+          radius: 20,
+          opacity: 0.85,
+          gradient: [
+            'rgba(0,0,0,0)',
+            'rgba(21,18,42,1)',
+            'rgba(62,0,248,1)',
+            'rgba(149,253,237,1)',
+            'rgba(154,255,62,1)',
+            'rgba(246,254,71,1)',
+            'rgba(216,36,36,1)',
+          ],
+        });
+      }}
+    />
   );
-  const tmp: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
-  const out: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
-  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
-    let s = 0, w = 0;
-    for (let d = -half; d <= half; d++) {
-      const px = Math.max(0, Math.min(n - 1, x + d));
-      s += mat[y][px] * k[d + half]; w += k[d + half];
-    }
-    tmp[y][x] = s / w;
-  }
-  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
-    let s = 0, w = 0;
-    for (let d = -half; d <= half; d++) {
-      const py = Math.max(0, Math.min(n - 1, y + d));
-      s += tmp[py][x] * k[d + half]; w += k[d + half];
-    }
-    out[y][x] = s / w;
-  }
-  return out;
 }
 
-// ─── 构建地形 Geometry ───────────────────────────────────────────────────────
-interface TerrainOpts {
-  dynamicNorm: boolean;
-  gamma: number;
-  gaussSigma: number;
-  interp: number;
-}
-function buildGeometry(opts: TerrainOpts): THREE.BufferGeometry {
-  const { dynamicNorm, gamma, gaussSigma, interp } = opts;
-  let grid: number[][] = Array.from({ length: GRID }, (_, i) =>
-    SAMPLE_MATRIX.slice(i * GRID, (i + 1) * GRID)
-  );
-  if (gaussSigma > 0) grid = gaussBlur(grid, GRID, gaussSigma);
-  const smoothed = bicubic(grid, GRID, interp);
-  const N = GRID * interp;
-
-  let dataMax = MAX_ADC;
-  if (dynamicNorm) {
-    dataMax = 1;
-    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++)
-      dataMax = Math.max(dataMax, smoothed[y][x]);
-  }
-
-  const geo = new THREE.PlaneGeometry(10, 10, N - 1, N - 1);
-  geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position as THREE.BufferAttribute;
-  const cols = new Float32Array(pos.count * 3);
-
-  for (let i = 0; i < pos.count; i++) {
-    const ix = i % N, iy = Math.floor(i / N);
-    const raw = smoothed[Math.min(iy, N - 1)][Math.min(ix, N - 1)];
-    const norm = Math.min(raw / dataMax, 1);
-    const t = gamma !== 1 ? Math.pow(norm, gamma) : norm;
-    pos.setY(i, t * HEIGHT_SCALE);
-    const [r, g, b] = terrainColor(t);
-    cols[i * 3] = r; cols[i * 3 + 1] = g; cols[i * 3 + 2] = b;
-  }
-  geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
-  geo.computeVertexNormals();
-  return geo;
-}
-
-// ─── 原生 Three.js 场景初始化 ────────────────────────────────────────────────
-interface SceneOpts extends TerrainOpts {
-  useLighting: boolean;
-}
-function initScene(canvas: HTMLCanvasElement, opts: SceneOpts) {
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  canvas.width = w * window.devicePixelRatio;
-  canvas.height = h * window.devicePixelRatio;
-
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(w, h, false);
-  renderer.shadowMap.enabled = opts.useLighting;
-  renderer.toneMapping = opts.useLighting ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
-  renderer.toneMappingExposure = 1.1;
-
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#090f1a');
-  scene.fog = new THREE.Fog('#090f1a', 22, 40);
-
-  const camera = new THREE.PerspectiveCamera(42, w / h, 0.1, 100);
-  camera.position.set(8, 7, 8);
-  camera.lookAt(0, 1.5, 0);
-
-  // 底板
-  const floorGeo = new THREE.PlaneGeometry(12, 12);
-  floorGeo.rotateX(-Math.PI / 2);
-  const floor = new THREE.Mesh(floorGeo, new THREE.MeshBasicMaterial({ color: '#0a1520' }));
-  floor.position.y = -0.02;
-  scene.add(floor);
-  const grid = new THREE.GridHelper(12, 48, 0x1a3050, 0x0f1d2e);
-  grid.position.y = -0.01;
-  scene.add(grid);
-
-  // 灯光
-  if (opts.useLighting) {
-    scene.add(new THREE.AmbientLight(0xffffff, 0.3));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.3);
-    sun.position.set(8, 12, 6);
-    sun.castShadow = true;
-    scene.add(sun);
-    const fill = new THREE.DirectionalLight(0x4488ff, 0.45);
-    fill.position.set(-5, 4, -4);
-    scene.add(fill);
-  } else {
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-  }
-
-  // 地形
-  const geo = buildGeometry(opts);
-  const mat = opts.useLighting
-    ? new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.55, metalness: 0 })
-    : new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  scene.add(mesh);
-
-  // 网格线（仅在有压力区域）
-  const wireGeo = new THREE.WireframeGeometry(geo);
-  const wireMat = new THREE.LineBasicMaterial({ color: 0xe0f0ff, transparent: true, opacity: 0.12 });
-  scene.add(new THREE.LineSegments(wireGeo, wireMat));
-
-  // OrbitControls
-  const controls = new OrbitControls(camera, canvas);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.05;
-  controls.minDistance = 4;
-  controls.maxDistance = 20;
-  controls.target.set(0, 1.5, 0);
-  controls.update();
-
-  let animId: number;
-  function animate() {
-    animId = requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-  }
-  animate();
-
-  // 响应容器尺寸变化
-  const ro = new ResizeObserver(() => {
-    const nw = canvas.clientWidth, nh = canvas.clientHeight;
-    camera.aspect = nw / nh;
-    camera.updateProjectionMatrix();
-    renderer.setSize(nw, nh, false);
-  });
-  ro.observe(canvas);
-
-  return () => {
-    cancelAnimationFrame(animId);
-    ro.disconnect();
-    controls.dispose();
-    renderer.dispose();
-    geo.dispose();
-    mat.dispose();
-    wireGeo.dispose();
-    wireMat.dispose();
-  };
-}
-
-// ─── 单格组件 ────────────────────────────────────────────────────────────────
-interface PanelCfg {
-  label: string;
-  subtitle: string;
-  tags: { text: string; color: 'red' | 'blue' | 'yellow' | 'emerald' }[];
-  opts: SceneOpts;
-  highlight?: boolean;
-}
-
-const TAG_STYLE: Record<string, { bg: string; text: string; border: string }> = {
-  red:     { bg: 'rgba(239,68,68,0.12)',    text: '#f87171', border: 'rgba(239,68,68,0.3)'    },
-  blue:    { bg: 'rgba(59,130,246,0.12)',   text: '#60a5fa', border: 'rgba(59,130,246,0.3)'   },
-  yellow:  { bg: 'rgba(234,179,8,0.12)',    text: '#facc15', border: 'rgba(234,179,8,0.3)'    },
-  emerald: { bg: 'rgba(52,211,153,0.12)',   text: '#34d399', border: 'rgba(52,211,153,0.3)'   },
-};
-
-function TerrainPanel({ cfg }: { cfg: PanelCfg }) {
+// ─── 2. Canvas 2D 热力图 ─────────────────────────────────────────────────────
+// 移植自 canvas.jsx 的 Intensity 颜色方案 + 离屏圆形叠加
+function Canvas2DHeatmap() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const cleanup = initScene(canvas, cfg.opts);
-    return cleanup;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    const W = canvas.offsetWidth, H = canvas.offsetHeight;
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d')!;
+
+    // 构建颜色渐变查找表（256×4 RGBA）
+    const palCanvas = document.createElement('canvas');
+    palCanvas.width = 256; palCanvas.height = 1;
+    const palCtx = palCanvas.getContext('2d', { willReadFrequently: true })!;
+    const grad = palCtx.createLinearGradient(0, 0, 256, 1);
+    grad.addColorStop(0,    'rgba(21,18,42,1)');
+    grad.addColorStop(0.40, 'rgba(62,0,248,1)');
+    grad.addColorStop(0.55, 'rgba(149,253,237,1)');
+    grad.addColorStop(0.70, 'rgba(154,255,62,1)');
+    grad.addColorStop(0.85, 'rgba(246,254,71,1)');
+    grad.addColorStop(1.0,  'rgba(216,36,36,1)');
+    palCtx.fillStyle = grad;
+    palCtx.fillRect(0, 0, 256, 1);
+    const palette = palCtx.getImageData(0, 0, 256, 1).data;
+
+    // 离屏圆形（带 shadowBlur 的柔和光斑）
+    const RADIUS = 22;
+    const BLUR = RADIUS / 2;
+    const R2 = RADIUS + BLUR;
+    const circleCanvas = document.createElement('canvas');
+    circleCanvas.width = R2 * 2; circleCanvas.height = R2 * 2;
+    const cCtx = circleCanvas.getContext('2d')!;
+    cCtx.shadowBlur = BLUR;
+    cCtx.shadowColor = 'black';
+    cCtx.shadowOffsetX = cCtx.shadowOffsetY = 10000;
+    cCtx.beginPath();
+    cCtx.arc(R2 - 10000, R2 - 10000, RADIUS, 0, Math.PI * 2);
+    cCtx.fill();
+
+    // 按 alpha 分组绘制
+    const groups: Record<string, { x: number; y: number }[]> = {};
+    for (let row = 0; row < GRID; row++) {
+      for (let col = 0; col < GRID; col++) {
+        const v = MATRIX[row * GRID + col];
+        if (v <= 0) continue;
+        const alpha = Math.min(1, v / MAX_ADC).toFixed(2);
+        if (!groups[alpha]) groups[alpha] = [];
+        groups[alpha].push({
+          x: col * W / GRID,
+          y: row * H / GRID,
+        });
+      }
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    for (const [alpha, pts] of Object.entries(groups)) {
+      ctx.globalAlpha = parseFloat(alpha);
+      for (const p of pts) {
+        ctx.drawImage(circleCanvas, p.x - R2, p.y - R2);
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // 颜色映射
+    const imgData = ctx.getImageData(0, 0, W, H);
+    const px = imgData.data;
+    for (let i = 3; i < px.length; i += 4) {
+      const a = px[i];
+      if (a > 0) {
+        const idx = Math.min(255, a) * 4;
+        px[i - 3] = palette[idx];
+        px[i - 2] = palette[idx + 1];
+        px[i - 1] = palette[idx + 2];
+        px[i]     = Math.round(a * 0.92);
+      }
+    }
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, W, H);
+    ctx.putImageData(imgData, 0, 0);
   }, []);
 
-  const borderColor = cfg.highlight ? 'rgba(52,211,153,0.35)' : 'rgba(255,255,255,0.08)';
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ width: '100%', height: '100%', display: 'block', background: '#0d1117' }}
+    />
+  );
+}
+
+// ─── 3. WebGL 2D 热力图 ──────────────────────────────────────────────────────
+const VS1 = `
+  attribute vec4 a_Position;
+  uniform vec2 u_res; uniform float u_max; uniform float u_min; uniform float u_blur;
+  attribute float a_val; attribute vec2 a_center; attribute float a_radius;
+  varying vec2 v_center; varying vec2 v_res; varying float v_radius;
+  varying float v_max; varying float v_min; varying float v_val; varying float v_blur;
+  void main(){
+    gl_PointSize = a_radius * 2.0;
+    vec2 clip = a_center / u_res * 2.0 - 1.0;
+    gl_Position = vec4(clip * vec2(1,-1), 0, 1);
+    v_center = a_center; v_res = u_res; v_radius = a_radius - 1.0;
+    v_max = u_max; v_min = u_min; v_val = a_val; v_blur = u_blur;
+  }`;
+const FS1 = `
+  precision mediump float;
+  varying vec2 v_center; varying vec2 v_res; varying float v_radius;
+  varying float v_max; varying float v_min; varying float v_val; varying float v_blur;
+  void main(){
+    float x = gl_FragCoord.x, y = v_res.y - gl_FragCoord.y;
+    float dist = length(vec2(v_center.x - x, v_center.y - y));
+    float diff = v_radius - dist;
+    float pxA = clamp((v_val - v_min)/(v_max - v_min), 0.0, 1.0);
+    if(v_val >= v_max) pxA = 1.0;
+    if(diff > 0.0){
+      float t = diff / (v_radius * v_blur);
+      float p = smoothstep(0.0, 1.0, t);
+      gl_FragColor = vec4(0,0,0, p * pxA);
+    } else { gl_FragColor = vec4(0,0,0,0); }
+  }`;
+const VS2 = `attribute vec4 a_Position; void main(){ gl_Position = a_Position; }`;
+const FS2 = `
+  precision mediump float;
+  uniform vec2 u_res; uniform sampler2D u_tex;
+  vec3 colorMap(float p){
+    p = clamp(p,0.0,1.0);
+    const vec3 c0=vec3(0.082,0.071,0.165), c1=vec3(0.243,0.0,0.973),
+               c2=vec3(0.584,0.992,0.929), c3=vec3(0.604,1.0,0.243),
+               c4=vec3(0.965,0.996,0.278), c5=vec3(0.847,0.141,0.141);
+    if(p<0.40) return mix(c0,c1,p/0.40);
+    if(p<0.55) return mix(c1,c2,(p-0.40)/0.15);
+    if(p<0.70) return mix(c2,c3,(p-0.55)/0.15);
+    if(p<0.85) return mix(c3,c4,(p-0.70)/0.15);
+    return mix(c4,c5,(p-0.85)/0.15);
+  }
+  void main(){
+    vec2 uv = gl_FragCoord.xy / u_res.xy;
+    float a = texture2D(u_tex, uv).a;
+    if(a > 0.01){ gl_FragColor = vec4(colorMap(a), smoothstep(0.01,0.10,a)); }
+    else { gl_FragColor = vec4(0); }
+  }`;
+
+function compileShader(gl: WebGLRenderingContext, type: number, src: string) {
+  const s = gl.createShader(type)!;
+  gl.shaderSource(s, src); gl.compileShader(s);
+  return s;
+}
+function linkProg(gl: WebGLRenderingContext, vs: WebGLShader, fs: WebGLShader) {
+  const p = gl.createProgram()!;
+  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+  return p;
+}
+
+function WebGLHeatmap() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const W = canvas.offsetWidth, H = canvas.offsetHeight;
+    canvas.width = W; canvas.height = H;
+    const gl = canvas.getContext('webgl');
+    if (!gl) return;
+
+    const RADIUS = 18, MAX = 12, BLUR = 0.65;
+    const prog1 = linkProg(gl, compileShader(gl, gl.VERTEX_SHADER, VS1), compileShader(gl, gl.FRAGMENT_SHADER, FS1));
+    const prog2 = linkProg(gl, compileShader(gl, gl.VERTEX_SHADER, VS2), compileShader(gl, gl.FRAGMENT_SHADER, FS2));
+
+    // 构建点数据
+    const pts: number[] = [];
+    for (let row = 0; row < GRID; row++) {
+      for (let col = 0; col < GRID; col++) {
+        const v = MATRIX[row * GRID + col];
+        if (v > 0) {
+          pts.push(col * W / GRID + W / GRID / 2, row * H / GRID + H / GRID / 2, v / MAX_ADC * MAX);
+        }
+      }
+    }
+
+    // FBO
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+    // Pass 1
+    gl.useProgram(prog1);
+    gl.viewport(0, 0, W, H);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.uniform2f(gl.getUniformLocation(prog1, 'u_res'), W, H);
+    gl.uniform1f(gl.getUniformLocation(prog1, 'u_max'), MAX);
+    gl.uniform1f(gl.getUniformLocation(prog1, 'u_min'), 0);
+    gl.uniform1f(gl.getUniformLocation(prog1, 'u_blur'), BLUR);
+    const cLoc = gl.getAttribLocation(prog1, 'a_center');
+    const vLoc = gl.getAttribLocation(prog1, 'a_val');
+    const rLoc = gl.getAttribLocation(prog1, 'a_radius');
+    gl.vertexAttrib1f(rLoc, RADIUS + 1);
+    const buf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(cLoc); gl.enableVertexAttribArray(vLoc);
+    gl.vertexAttribPointer(cLoc, 2, gl.FLOAT, false, 12, 0);
+    gl.vertexAttribPointer(vLoc, 1, gl.FLOAT, false, 12, 8);
+    gl.drawArrays(gl.POINTS, 0, pts.length / 3);
+
+    // Pass 2
+    gl.useProgram(prog2);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.clearColor(0.05, 0.07, 0.09, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(gl.getUniformLocation(prog2, 'u_tex'), 0);
+    gl.uniform2f(gl.getUniformLocation(prog2, 'u_res'), W, H);
+    const pLoc = gl.getAttribLocation(prog2, 'a_Position');
+    const vb = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+    gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(pLoc);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }, []);
 
   return (
+    <canvas
+      ref={canvasRef}
+      style={{ width: '100%', height: '100%', display: 'block' }}
+    />
+  );
+}
+
+// ─── 4. Three.js 3D 地形 ─────────────────────────────────────────────────────
+type Stop = { t: number; r: number; g: number; b: number };
+const STOPS: Stop[] = [
+  {t:0.0,r:0.0,g:0.08,b:0.18},{t:0.06,r:0.0,g:0.28,b:0.52},
+  {t:0.14,r:0.0,g:0.55,b:0.7},{t:0.22,r:0.0,g:0.7,b:0.55},
+  {t:0.32,r:0.1,g:0.78,b:0.25},{t:0.42,r:0.45,g:0.82,b:0.05},
+  {t:0.52,r:0.78,g:0.75,b:0.0},{t:0.62,r:0.95,g:0.6,b:0.0},
+  {t:0.72,r:1.0,g:0.4,b:0.0},{t:0.82,r:1.0,g:0.25,b:0.0},
+  {t:1.0,r:1.0,g:0.08,b:0.0},
+];
+function tColor(t: number): [number,number,number] {
+  t = Math.max(0,Math.min(1,t));
+  let lo=STOPS[0],hi=STOPS[STOPS.length-1];
+  for(let i=0;i<STOPS.length-1;i++) if(t>=STOPS[i].t&&t<=STOPS[i+1].t){lo=STOPS[i];hi=STOPS[i+1];break;}
+  const f=hi.t>lo.t?(t-lo.t)/(hi.t-lo.t):0;
+  return [lo.r+(hi.r-lo.r)*f,lo.g+(hi.g-lo.g)*f,lo.b+(hi.b-lo.b)*f];
+}
+function cubicW(t:number){const a=-0.5,at=Math.abs(t);if(at<=1)return(a+2)*at**3-(a+3)*at**2+1;if(at<2)return a*at**3-5*a*at**2+8*a*at-4*a;return 0;}
+function bicubic(src:number[][],n:number,s:number):number[][]{
+  const d=n*s,dst:number[][]=Array.from({length:d},()=>new Array(d).fill(0));
+  for(let oy=0;oy<d;oy++)for(let ox=0;ox<d;ox++){
+    const sx=(ox/(d-1))*(n-1),sy=(oy/(d-1))*(n-1),ix=Math.floor(sx),iy=Math.floor(sy),fx=sx-ix,fy=sy-iy;
+    let sum=0,ws=0;
+    for(let dy=-1;dy<=2;dy++)for(let dx=-1;dx<=2;dx++){
+      const px=Math.max(0,Math.min(n-1,ix+dx)),py=Math.max(0,Math.min(n-1,iy+dy)),w=cubicW(fx-dx)*cubicW(fy-dy);
+      sum+=src[py][px]*w;ws+=w;
+    }
+    dst[oy][ox]=Math.max(0,ws>0?sum/ws:0);
+  }
+  return dst;
+}
+function gaussBlur(mat:number[][],n:number,sigma:number):number[][]{
+  const size=Math.ceil(sigma*3)*2+1,half=Math.floor(size/2);
+  const k=Array.from({length:size},(_,i)=>Math.exp(-((i-half)**2)/(2*sigma*sigma)));
+  const tmp:number[][]=Array.from({length:n},()=>new Array(n).fill(0));
+  const out:number[][]=Array.from({length:n},()=>new Array(n).fill(0));
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++){let s=0,w=0;for(let d=-half;d<=half;d++){const px=Math.max(0,Math.min(n-1,x+d));s+=mat[y][px]*k[d+half];w+=k[d+half];}tmp[y][x]=s/w;}
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++){let s=0,w=0;for(let d=-half;d<=half;d++){const py=Math.max(0,Math.min(n-1,y+d));s+=tmp[py][x]*k[d+half];w+=k[d+half];}out[y][x]=s/w;}
+  return out;
+}
+
+function ThreeTerrain() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const W = canvas.offsetWidth, H = canvas.offsetHeight;
+    canvas.width = W * devicePixelRatio; canvas.height = H * devicePixelRatio;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(W, H, false);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.1;
+    renderer.shadowMap.enabled = true;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#090f1a');
+    scene.fog = new THREE.Fog('#090f1a', 22, 40);
+
+    const camera = new THREE.PerspectiveCamera(42, W/H, 0.1, 100);
+    camera.position.set(8, 7, 8);
+
+    // 灯光
+    scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.3);
+    sun.position.set(8,12,6); sun.castShadow=true; scene.add(sun);
+    const fill = new THREE.DirectionalLight(0x4488ff, 0.45);
+    fill.position.set(-5,4,-4); scene.add(fill);
+
+    // 底板
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(12,12), new THREE.MeshBasicMaterial({color:'#0a1520'}));
+    floor.rotation.x=-Math.PI/2; floor.position.y=-0.02; scene.add(floor);
+    const grid = new THREE.GridHelper(12,48,0x1a3050,0x0f1d2e);
+    grid.position.y=-0.01; scene.add(grid);
+
+    // 地形
+    let g2d:number[][]=Array.from({length:GRID},(_,i)=>MATRIX.slice(i*GRID,(i+1)*GRID));
+    g2d=gaussBlur(g2d,GRID,0.5);
+    const sm=bicubic(g2d,GRID,3);
+    const N=GRID*3;
+    let dMax=1;
+    for(let y=0;y<N;y++)for(let x=0;x<N;x++)dMax=Math.max(dMax,sm[y][x]);
+
+    const geo=new THREE.PlaneGeometry(10,10,N-1,N-1);
+    geo.rotateX(-Math.PI/2);
+    const pos=geo.attributes.position as THREE.BufferAttribute;
+    const cols=new Float32Array(pos.count*3);
+    for(let i=0;i<pos.count;i++){
+      const ix=i%N,iy=Math.floor(i/N);
+      const raw=sm[Math.min(iy,N-1)][Math.min(ix,N-1)];
+      const t=Math.pow(Math.min(raw/dMax,1),0.75);
+      pos.setY(i,t*4.5);
+      const [r,g,b]=tColor(t);
+      cols[i*3]=r;cols[i*3+1]=g;cols[i*3+2]=b;
+    }
+    geo.setAttribute('color',new THREE.BufferAttribute(cols,3));
+    geo.computeVertexNormals();
+
+    const mat=new THREE.MeshStandardMaterial({vertexColors:true,side:THREE.DoubleSide,roughness:0.55,metalness:0});
+    const mesh=new THREE.Mesh(geo,mat);
+    mesh.castShadow=true; mesh.receiveShadow=true; scene.add(mesh);
+
+    const controls=new OrbitControls(camera,canvas);
+    controls.enableDamping=true; controls.dampingFactor=0.05;
+    controls.minDistance=4; controls.maxDistance=20;
+    controls.target.set(0,1.5,0); controls.update();
+
+    let id:number;
+    const animate=()=>{id=requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);};
+    animate();
+
+    const ro=new ResizeObserver(()=>{
+      const nw=canvas.offsetWidth,nh=canvas.offsetHeight;
+      camera.aspect=nw/nh; camera.updateProjectionMatrix();
+      renderer.setSize(nw,nh,false);
+    });
+    ro.observe(canvas);
+
+    return ()=>{cancelAnimationFrame(id);ro.disconnect();controls.dispose();renderer.dispose();};
+  }, []);
+
+  return <canvas ref={canvasRef} style={{width:'100%',height:'100%',display:'block'}} />;
+}
+
+// ─── 面板卡片 ────────────────────────────────────────────────────────────────
+interface PanelProps {
+  title: string;
+  subtitle: string;
+  badge: string;
+  badgeColor: string;
+  children: React.ReactNode;
+  highlight?: boolean;
+}
+function Panel({ title, subtitle, badge, badgeColor, children, highlight }: PanelProps) {
+  const border = highlight ? 'rgba(52,211,153,0.35)' : 'rgba(255,255,255,0.08)';
+  return (
     <div className="rounded-2xl overflow-hidden flex flex-col"
-      style={{
-        border: `1px solid ${borderColor}`,
-        background: 'rgba(255,255,255,0.02)',
-        boxShadow: cfg.highlight ? '0 0 32px rgba(52,211,153,0.07)' : undefined,
-      }}>
-      {/* 标题栏 */}
-      <div className="px-4 py-3 border-b flex items-start justify-between gap-2 flex-wrap"
-        style={{ borderColor }}>
+      style={{ border:`1px solid ${border}`, background:'rgba(255,255,255,0.02)',
+               boxShadow: highlight ? '0 0 32px rgba(52,211,153,0.07)' : undefined }}>
+      <div className="px-4 py-3 border-b flex items-center justify-between gap-3"
+        style={{ borderColor: border }}>
         <div>
           <div className="flex items-center gap-2">
-            {cfg.highlight && <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />}
-            <span className="text-sm font-semibold text-white">{cfg.label}</span>
+            {highlight && <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />}
+            <span className="text-sm font-semibold text-white">{title}</span>
           </div>
-          <div className="text-[11px] text-slate-500 mt-0.5 font-mono">{cfg.subtitle}</div>
+          <div className="text-[11px] text-slate-500 mt-0.5 font-mono">{subtitle}</div>
         </div>
-        <div className="flex flex-wrap gap-1 justify-end shrink-0">
-          {cfg.tags.map((t, i) => {
-            const s = TAG_STYLE[t.color];
-            return (
-              <span key={i} className="px-2 py-0.5 rounded text-[10px] font-mono border"
-                style={{ background: s.bg, color: s.text, borderColor: s.border }}>
-                {t.text}
-              </span>
-            );
-          })}
-        </div>
+        <span className="px-2.5 py-1 rounded-full text-[11px] font-mono shrink-0"
+          style={{ background: badgeColor + '18', color: badgeColor, border: `1px solid ${badgeColor}40` }}>
+          {badge}
+        </span>
       </div>
-      {/* 3D Canvas */}
-      <div style={{ height: 300, position: 'relative' }}>
-        <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <div style={{ height: 340, position: 'relative', overflow: 'hidden' }}>
+        {children}
       </div>
     </div>
   );
 }
-
-// ─── 四种配置 ────────────────────────────────────────────────────────────────
-const PANELS: PanelCfg[] = [
-  {
-    label: 'A · 原版',
-    subtitle: 'meshBasicMaterial · 固定归一化 MAX=170 · 线性 gamma=1',
-    tags: [
-      { text: '无光照', color: 'red' },
-      { text: '固定MAX=170', color: 'red' },
-      { text: 'gamma=1.0', color: 'red' },
-      { text: 'σ=1.0', color: 'red' },
-    ],
-    opts: { dynamicNorm: false, gamma: 1.0, gaussSigma: 1.0, interp: 3, useLighting: false },
-  },
-  {
-    label: 'B · 加方向光',
-    subtitle: 'meshStandardMaterial · directionalLight × 2 · 法线阴影',
-    tags: [
-      { text: '方向光×2', color: 'blue' },
-      { text: '法线阴影', color: 'blue' },
-      { text: 'roughness=0.55', color: 'blue' },
-    ],
-    opts: { dynamicNorm: false, gamma: 1.0, gaussSigma: 1.0, interp: 3, useLighting: true },
-  },
-  {
-    label: 'C · 动态归一化 + Gamma',
-    subtitle: 'meshBasicMaterial · 数据实际最大值归一化 · pow(t, 0.75)',
-    tags: [
-      { text: '动态MAX', color: 'yellow' },
-      { text: 'gamma=0.75', color: 'yellow' },
-      { text: '层次拉伸', color: 'yellow' },
-      { text: 'σ=0.5', color: 'yellow' },
-    ],
-    opts: { dynamicNorm: true, gamma: 0.75, gaussSigma: 0.5, interp: 3, useLighting: false },
-  },
-  {
-    label: 'D · 全部优化',
-    subtitle: 'meshStandardMaterial · 动态归一化 · gamma=0.75 · 双方向光',
-    tags: [
-      { text: '方向光×2', color: 'emerald' },
-      { text: '动态MAX', color: 'emerald' },
-      { text: 'gamma=0.75', color: 'emerald' },
-      { text: 'σ=0.5', color: 'emerald' },
-    ],
-    opts: { dynamicNorm: true, gamma: 0.75, gaussSigma: 0.5, interp: 3, useLighting: true },
-    highlight: true,
-  },
-];
-
-// ─── 差异对照表 ──────────────────────────────────────────────────────────────
-const DIFF_ROWS = [
-  { key: '材质',      a: 'meshBasicMaterial',    b: 'meshStandardMaterial', c: 'meshBasicMaterial',       d: 'meshStandardMaterial' },
-  { key: '光照',      a: '无',                   b: '方向光 × 2',           c: '无',                      d: '方向光 × 2' },
-  { key: '归一化',    a: '固定 MAX=170',          b: '固定 MAX=170',          c: '动态（数据实际最大值）',   d: '动态 MAX' },
-  { key: 'Gamma',    a: '1.0（线性）',            b: '1.0（线性）',            c: '0.75（低值拉伸）',         d: '0.75' },
-  { key: '高斯 σ',   a: '1.0',                   b: '1.0',                   c: '0.5',                     d: '0.5' },
-  { key: '3D 立体感', a: '弱（无光影）',           b: '强（坡面阴影）',          c: '弱',                      d: '最强' },
-  { key: '颜色层次',  a: '少（高值区单调）',        b: '少',                    c: '丰富（中低值拉伸）',        d: '最丰富' },
-];
 
 // ─── 主页面 ──────────────────────────────────────────────────────────────────
 export default function Home() {
@@ -407,71 +506,101 @@ export default function Home() {
     <div className="min-h-screen text-slate-200"
       style={{ background: 'linear-gradient(160deg,#060a10 0%,#0b1220 60%,#060a10 100%)' }}>
 
-      {/* Header */}
-      <header className="border-b border-white/6 sticky top-0 z-10 backdrop-blur-sm"
+      <header className="border-b border-white/6 sticky top-0 z-20 backdrop-blur-sm"
         style={{ background: 'rgba(6,10,16,0.92)' }}>
-        <div className="max-w-7xl mx-auto px-6 h-13 flex items-center justify-between py-3">
+        <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-7 h-7 rounded-lg flex items-center justify-center"
               style={{ background: 'linear-gradient(135deg,#4f9cf9,#7c3aed)' }}>
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path d="M1 12 L4 6 L7 9 L10 4 L13 8" stroke="white" strokeWidth="1.5"
-                  strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+                <circle cx="4" cy="4" r="2.5" fill="white" fillOpacity="0.9"/>
+                <circle cx="10" cy="9" r="2" fill="white" fillOpacity="0.6"/>
+                <circle cx="7" cy="11.5" r="1.5" fill="white" fillOpacity="0.4"/>
               </svg>
             </div>
-            <span className="font-semibold text-sm text-white">3D Terrain</span>
-            <span className="text-slate-600 text-sm">/ 四种渲染方式对比</span>
+            <span className="font-semibold text-sm text-white">HeatMap Renderer</span>
+            <span className="text-slate-600 text-sm">/ 四种渲染技术对比</span>
           </div>
-          <div className="text-xs text-slate-500 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            Three.js · 原生 WebGL
+          <div className="flex items-center gap-4 text-xs text-slate-500">
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />Google Maps
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />Canvas 2D
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />WebGL 2D
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />Three.js 3D
+            </span>
           </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
-
-        {/* Title */}
-        <div className="space-y-1.5">
-          <h1 className="text-2xl font-bold text-white tracking-tight">3D 地形渲染方式对比</h1>
-          <p className="text-slate-400 text-sm max-w-3xl">
-            相同的 32×32 压力传感器数据，四种不同的 Three.js 渲染配置。每个 Canvas 均可独立旋转缩放。
+      <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-white tracking-tight">四种热力图渲染技术</h1>
+          <p className="text-slate-400 text-sm mt-1 max-w-3xl">
+            相同的 32×32 压力传感器数据，分别用 Google Maps、Canvas 2D、WebGL 2D、Three.js 3D 四种方式渲染。
           </p>
         </div>
 
-        {/* 四格 Canvas */}
         <div className="grid grid-cols-2 gap-5">
-          {PANELS.map((cfg, i) => <TerrainPanel key={i} cfg={cfg} />)}
+          <Panel title="Google Maps 热力图" subtitle="HeatmapLayer · LatLng 地理坐标映射"
+            badge="Maps API" badgeColor="#4285f4">
+            <MapHeatmap />
+          </Panel>
+
+          <Panel title="Canvas 2D 热力图" subtitle="离屏圆形叠加 · getImageData 颜色映射"
+            badge="Canvas 2D" badgeColor="#f59e0b">
+            <Canvas2DHeatmap />
+          </Panel>
+
+          <Panel title="WebGL 2D 热力图" subtitle="双 Pass FBO · GLSL 颜色映射 · GPU 渲染"
+            badge="WebGL" badgeColor="#a855f7">
+            <WebGLHeatmap />
+          </Panel>
+
+          <Panel title="Three.js 3D 地形" subtitle="meshStandardMaterial · 动态归一化 · 双方向光"
+            badge="Three.js" badgeColor="#34d399" highlight>
+            <ThreeTerrain />
+          </Panel>
         </div>
 
-        {/* 差异对照表 */}
+        {/* 技术对比表 */}
         <div className="rounded-2xl border border-white/8 overflow-hidden"
           style={{ background: 'rgba(255,255,255,0.02)' }}>
-          <div className="px-5 py-3.5 border-b border-white/6 flex items-center gap-2">
-            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="text-blue-400">
-              <rect x="1" y="1" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="1.3"/>
-              <path d="M1 5h13M5 1v13" stroke="currentColor" strokeWidth="1.3"/>
-            </svg>
-            <span className="text-sm font-medium text-white">参数差异对照</span>
+          <div className="px-5 py-3.5 border-b border-white/6">
+            <span className="text-sm font-medium text-white">技术特性对比</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs font-mono">
               <thead>
-                <tr className="border-b border-white/6">
-                  <th className="px-4 py-2.5 text-left text-slate-500 font-normal w-24">参数</th>
-                  {['A · 原版','B · 加方向光','C · 动态+Gamma','D · 全部优化'].map((h, i) => (
-                    <th key={i} className={`px-4 py-2.5 text-left font-normal ${i===3?'text-emerald-400':'text-slate-400'}`}>{h}</th>
-                  ))}
+                <tr className="border-b border-white/6 text-slate-400">
+                  <th className="px-4 py-2.5 text-left font-normal">特性</th>
+                  <th className="px-4 py-2.5 text-left font-normal text-blue-400">Google Maps</th>
+                  <th className="px-4 py-2.5 text-left font-normal text-yellow-400">Canvas 2D</th>
+                  <th className="px-4 py-2.5 text-left font-normal text-purple-400">WebGL 2D</th>
+                  <th className="px-4 py-2.5 text-left font-normal text-emerald-400">Three.js 3D</th>
                 </tr>
               </thead>
-              <tbody>
-                {DIFF_ROWS.map((row, i) => (
-                  <tr key={i} className="border-b border-white/4 hover:bg-white/[0.03] transition-colors">
-                    <td className="px-4 py-2 text-slate-500">{row.key}</td>
-                    <td className="px-4 py-2 text-red-400/80">{row.a}</td>
-                    <td className="px-4 py-2 text-blue-400/80">{row.b}</td>
-                    <td className="px-4 py-2 text-yellow-400/80">{row.c}</td>
-                    <td className="px-4 py-2 text-emerald-400 font-medium">{row.d}</td>
+              <tbody className="text-slate-400">
+                {[
+                  ['渲染维度', '2D 地图叠加', '2D 平面', '2D 平面', '3D 地形'],
+                  ['GPU 加速', '是（地图底层）', '否（CPU 像素操作）', '是（GLSL Shader）', '是（WebGL）'],
+                  ['实时性能', '中（受地图限制）', '低（getImageData 慢）', '高（纯 GPU）', '高（顶点更新）'],
+                  ['地理信息', '有（真实坐标）', '无', '无', '无'],
+                  ['交互方式', '地图平移/缩放', '静态', '静态', '3D 旋转/缩放'],
+                  ['颜色自定义', '有限（gradient 数组）', '完全自定义', '完全自定义（GLSL）', '完全自定义'],
+                  ['适用场景', '地理位置热力', '简单数据可视化', '高性能实时热力', '压力分布 3D 展示'],
+                ].map(([feat, ...vals], i) => (
+                  <tr key={i} className="border-b border-white/4 hover:bg-white/[0.02]">
+                    <td className="px-4 py-2 text-slate-500">{feat}</td>
+                    <td className="px-4 py-2 text-blue-400/70">{vals[0]}</td>
+                    <td className="px-4 py-2 text-yellow-400/70">{vals[1]}</td>
+                    <td className="px-4 py-2 text-purple-400/70">{vals[2]}</td>
+                    <td className="px-4 py-2 text-emerald-400/90 font-medium">{vals[3]}</td>
                   </tr>
                 ))}
               </tbody>
@@ -479,35 +608,8 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 关键改动说明 */}
-        <div className="grid grid-cols-3 gap-4">
-          {[
-            {
-              icon: '💡', title: 'meshStandardMaterial', color: '#60a5fa',
-              desc: '开启物理光照模型，法线参与漫反射计算。坡面朝向光源时更亮，背面更暗，3D 立体感从视觉上翻倍。原版的 meshBasicMaterial 完全忽略法线，只显示顶点颜色。',
-            },
-            {
-              icon: '📐', title: '动态归一化 + Gamma 0.75', color: '#facc15',
-              desc: '原版用固定 MAX=170，但数据实际最大值约 165，且大量数据集中在 30~100，颜色被压缩在低处。改为基于数据实际最大值归一化，再用 pow(t, 0.75) 拉伸低值区间，中间层次颜色更丰富。',
-            },
-            {
-              icon: '🔦', title: '双方向光配置', color: '#34d399',
-              desc: '主光（白色，右上方 [8,12,6]）产生主阴影；补光（蓝色，左侧 [−5,4,−4]）防止背面全黑。两盏灯强度比约 3:1，既有立体感又不会过曝。ACESFilmic 色调映射让颜色更自然。',
-            },
-          ].map((card, i) => (
-            <div key={i} className="rounded-xl border p-4 space-y-2.5"
-              style={{ borderColor: card.color + '30', background: card.color + '08' }}>
-              <div className="flex items-center gap-2">
-                <span className="text-lg">{card.icon}</span>
-                <span className="text-sm font-semibold" style={{ color: card.color }}>{card.title}</span>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-relaxed">{card.desc}</p>
-            </div>
-          ))}
-        </div>
-
         <div className="text-center text-xs text-slate-700 pb-4">
-          3D Terrain Rendering Comparison · Three.js + Native WebGL
+          HeatMap Rendering Comparison · Google Maps · Canvas 2D · WebGL · Three.js
         </div>
       </main>
     </div>
