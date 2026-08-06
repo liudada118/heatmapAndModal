@@ -1,16 +1,17 @@
 /**
- * 四种渲染技术对比展示
- * 1. Google Maps HeatmapLayer
- * 2. Canvas 2D 热力图（移植自 canvas.jsx）
- * 3. WebGL 2D 热力图（移植自 WebGL.HeatMapcopy2.js）
- * 4. Three.js 3D 地形（移植自 TerrainMapPage）
+ * 四种渲染技术对比 + WebGL 高斯模糊方案对比
+ * 新增第5格：WebGL 4-Pass 高斯模糊（方案B）
+ * Pass1: 小圆点 → FBO1
+ * Pass2: 水平高斯模糊 FBO1 → FBO2
+ * Pass3: 垂直高斯模糊 FBO2 → FBO3
+ * Pass4: 颜色映射 FBO3.alpha → 最终颜色
  */
 import { useEffect, useRef } from 'react';
 import { MapView } from '@/components/Map';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ─── 共享数据：32×32 压力传感器矩阵 ─────────────────────────────────────────
+// ─── 共享数据 ────────────────────────────────────────────────────────────────
 const GRID = 32;
 const MAX_ADC = 170;
 const MATRIX: number[] = [
@@ -48,239 +49,152 @@ const MATRIX: number[] = [
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 ];
 
-// 将矩阵数据映射到地理坐标（以上海为中心，0.002度/格）
-const CENTER_LAT = 31.23;
-const CENTER_LNG = 121.47;
-const STEP = 0.0003;
-
-// ─── 1. Google Maps 热力图 ───────────────────────────────────────────────────
+// ─── Google Maps ─────────────────────────────────────────────────────────────
+const CENTER_LAT = 31.23, CENTER_LNG = 121.47, STEP = 0.0003;
 function MapHeatmap() {
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   return (
-    <MapView
-      className="w-full h-full"
-      onMapReady={(map: google.maps.Map) => {
+    <div style={{position:'relative',width:'100%',height:'100%'}}>
+      <MapView className="w-full h-full" onMapReady={(map: google.maps.Map) => {
         map.setCenter({ lat: CENTER_LAT, lng: CENTER_LNG });
         map.setZoom(16);
-        map.setMapTypeId('roadmap');
-
-        const points: google.maps.visualization.WeightedLocation[] = [];
-        for (let row = 0; row < GRID; row++) {
-          for (let col = 0; col < GRID; col++) {
-            const v = MATRIX[row * GRID + col];
-            if (v > 0) {
-              points.push({
-                location: new google.maps.LatLng(
-                  CENTER_LAT + (row - GRID / 2) * STEP,
-                  CENTER_LNG + (col - GRID / 2) * STEP
-                ),
-                weight: v / MAX_ADC,
-              });
+        // 在地图上叠加一个 Canvas 热力图（不依赖废弃的 HeatmapLayer）
+        // 用 OverlayView 把 canvas 叠加到地图上
+        class HeatOverlay extends google.maps.OverlayView {
+          canvas: HTMLCanvasElement;
+          constructor() { super(); this.canvas = overlayRef.current!; }
+          onAdd() { this.getPanes()!.overlayLayer.appendChild(this.canvas); }
+          draw() {
+            const proj = this.getProjection();
+            const c = this.canvas;
+            const bounds = map.getBounds(); if (!bounds) return;
+            const ne = proj.fromLatLngToDivPixel(bounds.getNorthEast())!;
+            const sw = proj.fromLatLngToDivPixel(bounds.getSouthWest())!;
+            c.style.left = sw.x + 'px'; c.style.top = ne.y + 'px';
+            c.style.width = (ne.x - sw.x) + 'px'; c.style.height = (sw.y - ne.y) + 'px';
+            c.width = ne.x - sw.x; c.height = sw.y - ne.y;
+            const ctx = c.getContext('2d')!;
+            // 颜色查找表
+            const pc = document.createElement('canvas'); pc.width=256; pc.height=1;
+            const pCtx = pc.getContext('2d',{willReadFrequently:true})!;
+            const g = pCtx.createLinearGradient(0,0,256,1);
+            g.addColorStop(0,'rgba(21,18,42,0)'); g.addColorStop(0.2,'rgba(62,0,248,0.7)');
+            g.addColorStop(0.5,'rgba(149,253,237,0.85)'); g.addColorStop(0.75,'rgba(246,254,71,0.9)');
+            g.addColorStop(1,'rgba(216,36,36,0.95)');
+            pCtx.fillStyle=g; pCtx.fillRect(0,0,256,1);
+            const pal = pCtx.getImageData(0,0,256,1).data;
+            const R=Math.max(8, c.width/GRID*0.8), BL=R*0.6, R2=R+BL;
+            const cc2=document.createElement('canvas'); cc2.width=R2*2; cc2.height=R2*2;
+            const cCtx=cc2.getContext('2d')!;
+            cCtx.shadowBlur=BL; cCtx.shadowColor='black'; cCtx.shadowOffsetX=cCtx.shadowOffsetY=10000;
+            cCtx.beginPath(); cCtx.arc(R2-10000,R2-10000,R,0,Math.PI*2); cCtx.fill();
+            ctx.clearRect(0,0,c.width,c.height);
+            for (let r2=0;r2<GRID;r2++) for (let col=0;col<GRID;col++) {
+              const v=MATRIX[r2*GRID+col]; if(v<=0) continue;
+              const lat=CENTER_LAT+(r2-GRID/2)*STEP, lng=CENTER_LNG+(col-GRID/2)*STEP;
+              const pt=proj.fromLatLngToDivPixel(new google.maps.LatLng(lat,lng))!;
+              const px=pt.x-sw.x, py=pt.y-ne.y;
+              ctx.globalAlpha=Math.min(1,v/MAX_ADC)*0.85;
+              ctx.drawImage(cc2,px-R2,py-R2);
             }
+            ctx.globalAlpha=1;
+            const id=ctx.getImageData(0,0,c.width,c.height); const px=id.data;
+            for(let i=3;i<px.length;i+=4){ const a=px[i]; if(a>0){ const idx=Math.min(255,a)*4; px[i-3]=pal[idx]; px[i-2]=pal[idx+1]; px[i-1]=pal[idx+2]; } }
+            ctx.putImageData(id,0,0);
           }
+          onRemove() { this.canvas.parentNode?.removeChild(this.canvas); }
         }
-
-        new google.maps.visualization.HeatmapLayer({
-          data: points,
-          map,
-          radius: 20,
-          opacity: 0.85,
-          gradient: [
-            'rgba(0,0,0,0)',
-            'rgba(21,18,42,1)',
-            'rgba(62,0,248,1)',
-            'rgba(149,253,237,1)',
-            'rgba(154,255,62,1)',
-            'rgba(246,254,71,1)',
-            'rgba(216,36,36,1)',
-          ],
-        });
-      }}
-    />
+        const overlay = new HeatOverlay();
+        overlay.setMap(map);
+        map.addListener('bounds_changed', () => overlay.draw());
+      }} />
+      <canvas ref={overlayRef} style={{position:'absolute',top:0,left:0,pointerEvents:'none'}} />
+    </div>
   );
 }
 
-// ─── 2. Canvas 2D 热力图 ─────────────────────────────────────────────────────
-// 移植自 canvas.jsx 的 Intensity 颜色方案 + 离屏圆形叠加
+// ─── Canvas 2D ───────────────────────────────────────────────────────────────
 function Canvas2DHeatmap() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
+  const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = ref.current; if (!canvas) return;
     const W = canvas.offsetWidth, H = canvas.offsetHeight;
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext('2d')!;
-
-    // 构建颜色渐变查找表（256×4 RGBA）
-    const palCanvas = document.createElement('canvas');
-    palCanvas.width = 256; palCanvas.height = 1;
-    const palCtx = palCanvas.getContext('2d', { willReadFrequently: true })!;
-    const grad = palCtx.createLinearGradient(0, 0, 256, 1);
-    grad.addColorStop(0,    'rgba(21,18,42,1)');
-    grad.addColorStop(0.40, 'rgba(62,0,248,1)');
-    grad.addColorStop(0.55, 'rgba(149,253,237,1)');
-    grad.addColorStop(0.70, 'rgba(154,255,62,1)');
-    grad.addColorStop(0.85, 'rgba(246,254,71,1)');
-    grad.addColorStop(1.0,  'rgba(216,36,36,1)');
-    palCtx.fillStyle = grad;
-    palCtx.fillRect(0, 0, 256, 1);
-    const palette = palCtx.getImageData(0, 0, 256, 1).data;
-
-    // 离屏圆形（带 shadowBlur 的柔和光斑）
-    const RADIUS = 22;
-    const BLUR = RADIUS / 2;
-    const R2 = RADIUS + BLUR;
-    const circleCanvas = document.createElement('canvas');
-    circleCanvas.width = R2 * 2; circleCanvas.height = R2 * 2;
-    const cCtx = circleCanvas.getContext('2d')!;
-    cCtx.shadowBlur = BLUR;
-    cCtx.shadowColor = 'black';
-    cCtx.shadowOffsetX = cCtx.shadowOffsetY = 10000;
-    cCtx.beginPath();
-    cCtx.arc(R2 - 10000, R2 - 10000, RADIUS, 0, Math.PI * 2);
-    cCtx.fill();
-
-    // 按 alpha 分组绘制
-    const groups: Record<string, { x: number; y: number }[]> = {};
-    for (let row = 0; row < GRID; row++) {
-      for (let col = 0; col < GRID; col++) {
-        const v = MATRIX[row * GRID + col];
-        if (v <= 0) continue;
-        const alpha = Math.min(1, v / MAX_ADC).toFixed(2);
-        if (!groups[alpha]) groups[alpha] = [];
-        groups[alpha].push({
-          x: col * W / GRID,
-          y: row * H / GRID,
-        });
-      }
+    const pc = document.createElement('canvas'); pc.width=256; pc.height=1;
+    const pCtx = pc.getContext('2d',{willReadFrequently:true})!;
+    const g = pCtx.createLinearGradient(0,0,256,1);
+    g.addColorStop(0,'rgba(21,18,42,1)'); g.addColorStop(0.40,'rgba(62,0,248,1)');
+    g.addColorStop(0.55,'rgba(149,253,237,1)'); g.addColorStop(0.70,'rgba(154,255,62,1)');
+    g.addColorStop(0.85,'rgba(246,254,71,1)'); g.addColorStop(1,'rgba(216,36,36,1)');
+    pCtx.fillStyle=g; pCtx.fillRect(0,0,256,1);
+    const pal = pCtx.getImageData(0,0,256,1).data;
+    const R=22,BL=R/2,R2=R+BL;
+    const cc=document.createElement('canvas'); cc.width=R2*2; cc.height=R2*2;
+    const cCtx=cc.getContext('2d')!;
+    cCtx.shadowBlur=BL; cCtx.shadowColor='black'; cCtx.shadowOffsetX=cCtx.shadowOffsetY=10000;
+    cCtx.beginPath(); cCtx.arc(R2-10000,R2-10000,R,0,Math.PI*2); cCtx.fill();
+    const grps: Record<string,{x:number,y:number}[]> = {};
+    for(let r=0;r<GRID;r++) for(let c=0;c<GRID;c++){
+      const v=MATRIX[r*GRID+c]; if(v<=0) continue;
+      const a=Math.min(1,v/MAX_ADC).toFixed(2);
+      if(!grps[a]) grps[a]=[];
+      grps[a].push({x:c*W/GRID, y:r*H/GRID});
     }
-
-    ctx.clearRect(0, 0, W, H);
-    for (const [alpha, pts] of Object.entries(groups)) {
-      ctx.globalAlpha = parseFloat(alpha);
-      for (const p of pts) {
-        ctx.drawImage(circleCanvas, p.x - R2, p.y - R2);
-      }
-    }
-    ctx.globalAlpha = 1;
-
-    // 颜色映射
-    const imgData = ctx.getImageData(0, 0, W, H);
-    const px = imgData.data;
-    for (let i = 3; i < px.length; i += 4) {
-      const a = px[i];
-      if (a > 0) {
-        const idx = Math.min(255, a) * 4;
-        px[i - 3] = palette[idx];
-        px[i - 2] = palette[idx + 1];
-        px[i - 1] = palette[idx + 2];
-        px[i]     = Math.round(a * 0.92);
-      }
-    }
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = '#0d1117';
-    ctx.fillRect(0, 0, W, H);
-    ctx.putImageData(imgData, 0, 0);
+    ctx.clearRect(0,0,W,H);
+    for(const [a,pts] of Object.entries(grps)){ ctx.globalAlpha=parseFloat(a); for(const p of pts) ctx.drawImage(cc,p.x-R2,p.y-R2); }
+    ctx.globalAlpha=1;
+    const id=ctx.getImageData(0,0,W,H); const px=id.data;
+    for(let i=3;i<px.length;i+=4){ const a=px[i]; if(a>0){ const idx=Math.min(255,a)*4; px[i-3]=pal[idx]; px[i-2]=pal[idx+1]; px[i-1]=pal[idx+2]; px[i]=Math.round(a*0.92); } }
+    ctx.clearRect(0,0,W,H); ctx.fillStyle='#0d1117'; ctx.fillRect(0,0,W,H); ctx.putImageData(id,0,0);
   }, []);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      style={{ width: '100%', height: '100%', display: 'block', background: '#0d1117' }}
-    />
-  );
+  return <canvas ref={ref} style={{width:'100%',height:'100%',display:'block',background:'#0d1117'}} />;
 }
 
-// ─── 3. WebGL 2D 热力图 ──────────────────────────────────────────────────────
-const VS1 = `
-  attribute vec4 a_Position;
-  uniform vec2 u_res; uniform float u_max; uniform float u_min; uniform float u_blur;
-  attribute float a_val; attribute vec2 a_center; attribute float a_radius;
-  varying vec2 v_center; varying vec2 v_res; varying float v_radius;
-  varying float v_max; varying float v_min; varying float v_val; varying float v_blur;
-  void main(){
-    gl_PointSize = a_radius * 2.0;
-    vec2 clip = a_center / u_res * 2.0 - 1.0;
-    gl_Position = vec4(clip * vec2(1,-1), 0, 1);
-    v_center = a_center; v_res = u_res; v_radius = a_radius - 1.0;
-    v_max = u_max; v_min = u_min; v_val = a_val; v_blur = u_blur;
-  }`;
-const FS1 = `
-  precision mediump float;
-  varying vec2 v_center; varying vec2 v_res; varying float v_radius;
-  varying float v_max; varying float v_min; varying float v_val; varying float v_blur;
-  void main(){
-    float x = gl_FragCoord.x, y = v_res.y - gl_FragCoord.y;
-    float dist = length(vec2(v_center.x - x, v_center.y - y));
-    float diff = v_radius - dist;
-    float pxA = clamp((v_val - v_min)/(v_max - v_min), 0.0, 1.0);
-    if(v_val >= v_max) pxA = 1.0;
-    if(diff > 0.0){
-      float t = diff / (v_radius * v_blur);
-      float p = smoothstep(0.0, 1.0, t);
-      gl_FragColor = vec4(0,0,0, p * pxA);
-    } else { gl_FragColor = vec4(0,0,0,0); }
-  }`;
-const VS2 = `attribute vec4 a_Position; void main(){ gl_Position = a_Position; }`;
-const FS2 = `
-  precision mediump float;
-  uniform vec2 u_res; uniform sampler2D u_tex;
-  vec3 colorMap(float p){
-    p = clamp(p,0.0,1.0);
-    const vec3 c0=vec3(0.082,0.071,0.165), c1=vec3(0.243,0.0,0.973),
-               c2=vec3(0.584,0.992,0.929), c3=vec3(0.604,1.0,0.243),
-               c4=vec3(0.965,0.996,0.278), c5=vec3(0.847,0.141,0.141);
-    if(p<0.40) return mix(c0,c1,p/0.40);
-    if(p<0.55) return mix(c1,c2,(p-0.40)/0.15);
-    if(p<0.70) return mix(c2,c3,(p-0.55)/0.15);
-    if(p<0.85) return mix(c3,c4,(p-0.70)/0.15);
-    return mix(c4,c5,(p-0.85)/0.15);
-  }
-  void main(){
-    vec2 uv = gl_FragCoord.xy / u_res.xy;
-    float a = texture2D(u_tex, uv).a;
-    if(a > 0.01){ gl_FragColor = vec4(colorMap(a), smoothstep(0.01,0.10,a)); }
-    else { gl_FragColor = vec4(0); }
-  }`;
+// ─── WebGL Shader 常量 & 辅助函数 ──────────────────────────────────────────
+const VS1_OLD=`attribute vec4 a_Position;uniform vec2 u_res;uniform float u_max,u_min,u_blur;attribute float a_val;attribute vec2 a_center;attribute float a_radius;varying vec2 v_center,v_res;varying float v_radius,v_max,v_min,v_val,v_blur;void main(){gl_PointSize=a_radius*2.0;vec2 clip=a_center/u_res*2.0-1.0;gl_Position=vec4(clip*vec2(1,-1),0,1);v_center=a_center;v_res=u_res;v_radius=a_radius-1.0;v_max=u_max;v_min=u_min;v_val=a_val;v_blur=u_blur;}`;
+const FS1_OLD=`precision mediump float;varying vec2 v_center,v_res;varying float v_radius,v_max,v_min,v_val,v_blur;void main(){float x=gl_FragCoord.x,y=v_res.y-gl_FragCoord.y;float dist=length(vec2(v_center.x-x,v_center.y-y));float diff=v_radius-dist;float pxA=clamp((v_val-v_min)/(v_max-v_min),0.0,1.0);if(v_val>=v_max)pxA=1.0;if(diff>0.0){float t=diff/(v_radius*v_blur);gl_FragColor=vec4(0,0,0,smoothstep(0.0,1.0,t)*pxA);}else{gl_FragColor=vec4(0,0,0,0);}}`;
+const VS_QUAD=`attribute vec2 a_pos;void main(){gl_Position=vec4(a_pos,0,1);}`;
+const FS_COLOR=`precision mediump float;uniform vec2 u_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_res;float a=texture2D(u_tex,uv).a;if(a>0.01){gl_FragColor=vec4(cm(a),smoothstep(0.01,0.10,a));}else{gl_FragColor=vec4(0);}}`;
+// VS_DOT: 每个点用 2 个三角形（6顶点）展开，避免 gl_PointSize 硬件限制
+// a_quad: [-1,-1, -1,1, 1,-1, 1,-1, -1,1, 1,1] * radius + center
+const VS_DOT=`attribute vec2 a_center;attribute float a_val;attribute vec2 a_quad;uniform vec2 u_res;uniform float u_max;uniform float u_radius;varying float v_alpha;varying vec2 v_center;varying vec2 v_fragPos;void main(){vec2 pos=a_center+a_quad*u_radius;vec2 clip=pos/u_res*2.0-1.0;gl_Position=vec4(clip*vec2(1,-1),0,1);v_alpha=clamp(a_val/u_max,0.0,1.0);v_center=a_center;v_fragPos=pos;}`;
+const FS_DOT=`precision mediump float;uniform highp float u_radius;varying float v_alpha;varying highp vec2 v_center;varying highp vec2 v_fragPos;void main(){highp float dist=length(v_fragPos-v_center);highp float sigma=u_radius*0.45;highp float g=exp(-(dist*dist)/(2.0*sigma*sigma));if(g<0.001){gl_FragColor=vec4(0);return;}gl_FragColor=vec4(0,0,0,g*v_alpha);}`;
+const FS_BLUR=`precision mediump float;uniform sampler2D u_tex;uniform vec2 u_step;uniform vec2 u_res;void main(){vec2 uv=gl_FragCoord.xy/u_res;float w[5];w[0]=0.2270;w[1]=0.1945;w[2]=0.1216;w[3]=0.0540;w[4]=0.0162;vec4 c=texture2D(u_tex,uv)*w[0];for(int i=1;i<=4;i++){c+=texture2D(u_tex,uv+float(i)*u_step)*w[i];c+=texture2D(u_tex,uv-float(i)*u_step)*w[i];}gl_FragColor=c;}`;
+// 高斯版专用颜色映射：阈值更低（高斯模糊后 alpha 被稀释），并对 alpha 做放大
+const FS_COLOR_GAUSS=`precision mediump float;uniform vec2 u_res;uniform vec2 u_fbo_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_fbo_res;float a=texture2D(u_tex,uv).a;float boosted=clamp(pow(a,0.55)*2.2,0.0,1.0);if(boosted>0.002){gl_FragColor=vec4(cm(boosted),smoothstep(0.002,0.03,boosted));}else{gl_FragColor=vec4(0);}}` ;
 
-function compileShader(gl: WebGLRenderingContext, type: number, src: string) {
-  const s = gl.createShader(type)!;
-  gl.shaderSource(s, src); gl.compileShader(s);
-  return s;
-}
-function linkProg(gl: WebGLRenderingContext, vs: WebGLShader, fs: WebGLShader) {
-  const p = gl.createProgram()!;
-  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
-  return p;
+function mkShader(gl:WebGLRenderingContext,type:number,src:string){const s=gl.createShader(type)!;gl.shaderSource(s,src);gl.compileShader(s);return s;}
+function mkProg(gl:WebGLRenderingContext,vs:string,fs:string){const p=gl.createProgram()!;gl.attachShader(p,mkShader(gl,gl.VERTEX_SHADER,vs));gl.attachShader(p,mkShader(gl,gl.FRAGMENT_SHADER,fs));gl.linkProgram(p);return p;}
+function mkFBO(gl:WebGLRenderingContext,W:number,H:number){
+  const tex=gl.createTexture()!;
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,W,H,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  const fb=gl.createFramebuffer()!;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  return {tex,fb};
 }
 
-function WebGLHeatmap() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
+// ─── WebGL 旧版（独立 canvas）────────────────────────────────────────────────
+function WebGLOldPanel() {
+  const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = ref.current; if (!canvas) return;
     const W = canvas.offsetWidth, H = canvas.offsetHeight;
     canvas.width = W; canvas.height = H;
-    const gl = canvas.getContext('webgl');
-    if (!gl) return;
-
+    const gl = canvas.getContext('webgl'); if (!gl) return;
     const RADIUS = 18, MAX = 12, BLUR = 0.65;
-    const prog1 = linkProg(gl, compileShader(gl, gl.VERTEX_SHADER, VS1), compileShader(gl, gl.FRAGMENT_SHADER, FS1));
-    const prog2 = linkProg(gl, compileShader(gl, gl.VERTEX_SHADER, VS2), compileShader(gl, gl.FRAGMENT_SHADER, FS2));
-
-    // 构建点数据
+    const p1 = mkProg(gl, VS1_OLD, FS1_OLD);
+    const p2 = mkProg(gl, VS_QUAD, FS_COLOR);
     const pts: number[] = [];
-    for (let row = 0; row < GRID; row++) {
-      for (let col = 0; col < GRID; col++) {
-        const v = MATRIX[row * GRID + col];
-        if (v > 0) {
-          pts.push(col * W / GRID + W / GRID / 2, row * H / GRID + H / GRID / 2, v / MAX_ADC * MAX);
-        }
-      }
+    for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) {
+      const v = MATRIX[r * GRID + c]; if (v <= 0) continue;
+      pts.push(c * W / GRID + W / GRID / 2, r * H / GRID + H / GRID / 2, v / MAX_ADC * MAX);
     }
-
-    // FBO
     const tex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -290,212 +204,283 @@ function WebGLHeatmap() {
     const fb = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-
-    // Pass 1
-    gl.useProgram(prog1);
-    gl.viewport(0, 0, W, H);
-    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(p1); gl.viewport(0, 0, W, H);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.uniform2f(gl.getUniformLocation(prog1, 'u_res'), W, H);
-    gl.uniform1f(gl.getUniformLocation(prog1, 'u_max'), MAX);
-    gl.uniform1f(gl.getUniformLocation(prog1, 'u_min'), 0);
-    gl.uniform1f(gl.getUniformLocation(prog1, 'u_blur'), BLUR);
-    const cLoc = gl.getAttribLocation(prog1, 'a_center');
-    const vLoc = gl.getAttribLocation(prog1, 'a_val');
-    const rLoc = gl.getAttribLocation(prog1, 'a_radius');
-    gl.vertexAttrib1f(rLoc, RADIUS + 1);
-    const buf = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.uniform2f(gl.getUniformLocation(p1,'u_res'),W,H);
+    gl.uniform1f(gl.getUniformLocation(p1,'u_max'),MAX);
+    gl.uniform1f(gl.getUniformLocation(p1,'u_min'),0);
+    gl.uniform1f(gl.getUniformLocation(p1,'u_blur'),BLUR);
+    gl.vertexAttrib1f(gl.getAttribLocation(p1,'a_radius'),RADIUS+1);
+    const buf = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(cLoc); gl.enableVertexAttribArray(vLoc);
-    gl.vertexAttribPointer(cLoc, 2, gl.FLOAT, false, 12, 0);
-    gl.vertexAttribPointer(vLoc, 1, gl.FLOAT, false, 12, 8);
+    gl.enableVertexAttribArray(gl.getAttribLocation(p1,'a_center'));
+    gl.enableVertexAttribArray(gl.getAttribLocation(p1,'a_val'));
+    gl.vertexAttribPointer(gl.getAttribLocation(p1,'a_center'),2,gl.FLOAT,false,12,0);
+    gl.vertexAttribPointer(gl.getAttribLocation(p1,'a_val'),1,gl.FLOAT,false,12,8);
     gl.drawArrays(gl.POINTS, 0, pts.length / 3);
-
-    // Pass 2
-    gl.useProgram(prog2);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.clearColor(0.05, 0.07, 0.09, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(p2); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.clearColor(0.05,0.07,0.09,1); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.uniform1i(gl.getUniformLocation(prog2, 'u_tex'), 0);
-    gl.uniform2f(gl.getUniformLocation(prog2, 'u_res'), W, H);
-    const pLoc = gl.getAttribLocation(prog2, 'a_Position');
-    const vb = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(gl.getUniformLocation(p2,'u_tex'),0);
+    gl.uniform2f(gl.getUniformLocation(p2,'u_res'),W,H);
+    const pL = gl.getAttribLocation(p2,'a_pos');
+    const vb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, vb);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
-    gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(pLoc);
+    gl.vertexAttribPointer(pL,2,gl.FLOAT,false,0,0); gl.enableVertexAttribArray(pL);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }, []);
+  return <canvas ref={ref} style={{width:'100%',height:'100%',display:'block'}} />;
+}
 
+// ─── WebGL 高斯模糊版（独立 canvas）─────────────────────────────────────────
+function WebGLGaussPanel() {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current; if (!canvas) return;
+    let initialized = false;
+    const init = () => {
+      if (initialized) return;
+      const W = canvas.offsetWidth, H = canvas.offsetHeight;
+      if (W === 0 || H === 0) return;
+      initialized = true;
+      canvas.width = W; canvas.height = H;
+      const glCtx = canvas.getContext('webgl');
+      if (!glCtx) { console.error('[WebGLGauss] WebGL context failed - likely context limit exceeded'); return; }
+      const gl = glCtx;
+
+      const DOT_RADIUS = 28, MAX = 12;
+      // WebGL1 FBO 需要 POT（2的幂次）纹理尺寸
+      const nextPOT = (n: number) => { let p = 1; while (p < n) p <<= 1; return p; };
+      const TW = nextPOT(W), TH = nextPOT(H);
+
+      // 编译 shader
+      function mkS(type: number, src: string) {
+        const s = gl.createShader(type)!;
+        gl.shaderSource(s, src); gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+          console.error('Shader error:', gl.getShaderInfoLog(s));
+        return s;
+      }
+      function mkP(vs: string, fs: string) {
+        const p = gl.createProgram()!;
+        gl.attachShader(p, mkS(gl.VERTEX_SHADER, vs));
+        gl.attachShader(p, mkS(gl.FRAGMENT_SHADER, fs));
+        gl.linkProgram(p);
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+          console.error('Program error:', gl.getProgramInfoLog(p));
+        return p;
+      }
+      function mkFBOLocal(w: number, h: number) {
+        const t = gl.createTexture()!;
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        const f = gl.createFramebuffer()!;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+        const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+        if (status !== gl.FRAMEBUFFER_COMPLETE)
+          console.error('FBO incomplete:', status);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return { tex: t, fb: f };
+      }
+
+      const pDot   = mkP(VS_DOT,  FS_DOT);
+      const pBlur  = mkP(VS_QUAD, FS_BLUR);
+      const pColor = mkP(VS_QUAD, FS_COLOR_GAUSS);
+
+      // 点数据
+      const pts: number[] = [];
+      for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) {
+        const v = MATRIX[r * GRID + c]; if (v <= 0) continue;
+        pts.push(c * W / GRID + W / GRID / 2, r * H / GRID + H / GRID / 2, v / MAX_ADC * MAX);
+      }
+
+      const fbo1 = mkFBOLocal(TW, TH);
+      const fbo2 = mkFBOLocal(TW, TH);
+
+      // 全屏四边形 buffer
+      const quadBuf = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+
+      // ── Pass 1: 高斯光斑 → fbo1（用三角形 quad，避免 gl_PointSize 限制）──
+      gl.useProgram(pDot);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo1.fb);
+      gl.viewport(0, 0, W, H);
+      gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.disable(gl.DEPTH_TEST);
+      gl.uniform2f(gl.getUniformLocation(pDot, 'u_res'), W, H);
+      gl.uniform1f(gl.getUniformLocation(pDot, 'u_max'), MAX);
+      gl.uniform1f(gl.getUniformLocation(pDot, 'u_radius'), DOT_RADIUS);
+      // 每个点展开为 6 顶点（2个三角形）
+      const QUAD = [-1,-1, -1,1, 1,-1, 1,-1, -1,1, 1,1];
+      const verts: number[] = [];
+      for (let i = 0; i < pts.length; i += 3) {
+        const cx = pts[i], cy = pts[i+1], val = pts[i+2];
+        for (let q = 0; q < 6; q++) {
+          verts.push(cx, cy, val, QUAD[q*2], QUAD[q*2+1]);
+        }
+      }
+      const ptBuf = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, ptBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+      const stride = 5 * 4; // 5 floats per vertex
+      const cLoc = gl.getAttribLocation(pDot, 'a_center');
+      const vLoc = gl.getAttribLocation(pDot, 'a_val');
+      const qLoc = gl.getAttribLocation(pDot, 'a_quad');
+      gl.enableVertexAttribArray(cLoc); gl.enableVertexAttribArray(vLoc); gl.enableVertexAttribArray(qLoc);
+      gl.vertexAttribPointer(cLoc, 2, gl.FLOAT, false, stride, 0);
+      gl.vertexAttribPointer(vLoc, 1, gl.FLOAT, false, stride, 8);
+      gl.vertexAttribPointer(qLoc, 2, gl.FLOAT, false, stride, 12);
+      gl.drawArrays(gl.TRIANGLES, 0, verts.length / 5);
+
+      // ── Pass 2~N: 可分离高斯模糊 ──
+      gl.useProgram(pBlur);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      // 绑定全屏 quad
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      const posLB = gl.getAttribLocation(pBlur, 'a_pos');
+      gl.vertexAttribPointer(posLB, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(posLB);
+
+      let srcFBO = fbo1, dstFBO = fbo2;
+      for (let pass = 0; pass < 3; pass++) {
+        // 水平模糊: srcFBO → dstFBO
+        gl.bindFramebuffer(gl.FRAMEBUFFER, dstFBO.fb);
+        gl.viewport(0, 0, W, H);
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, srcFBO.tex);
+        gl.uniform1i(gl.getUniformLocation(pBlur, 'u_tex'), 0);
+        gl.uniform2f(gl.getUniformLocation(pBlur, 'u_res'), TW, TH);
+        gl.uniform2f(gl.getUniformLocation(pBlur, 'u_step'), 1.0 / TW, 0.0);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        let tmp = srcFBO; srcFBO = dstFBO; dstFBO = tmp;
+
+        // 垂直模糊: srcFBO → dstFBO
+        gl.bindFramebuffer(gl.FRAMEBUFFER, dstFBO.fb);
+        gl.viewport(0, 0, W, H);
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, srcFBO.tex);
+        gl.uniform1i(gl.getUniformLocation(pBlur, 'u_tex'), 0);
+        gl.uniform2f(gl.getUniformLocation(pBlur, 'u_res'), TW, TH);
+        gl.uniform2f(gl.getUniformLocation(pBlur, 'u_step'), 0.0, 1.0 / TH);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        tmp = srcFBO; srcFBO = dstFBO; dstFBO = tmp;
+      }
+      // srcFBO 现在是最终高斯模糊结果
+
+      // ── 最终 Pass: 颜色映射 → 屏幕 ──
+      gl.useProgram(pColor);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, W, H);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.clearColor(0.05, 0.07, 0.09, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, srcFBO.tex);
+      gl.uniform1i(gl.getUniformLocation(pColor, 'u_tex'), 0);
+      gl.uniform2f(gl.getUniformLocation(pColor, 'u_res'), W, H);
+      gl.uniform2f(gl.getUniformLocation(pColor, 'u_fbo_res'), TW, TH); // FBO POT 尺寸，用于正确采样
+      const posLC = gl.getAttribLocation(pColor, 'a_pos');
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      gl.vertexAttribPointer(posLC, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(posLC);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    };
+    const ro = new ResizeObserver(init);
+    ro.observe(canvas);
+    init();
+    return () => ro.disconnect();
+  }, []);
+  return <canvas ref={ref} style={{width:'100%',height:'100%',display:'block'}} />;
+}
+
+// ─── WebGL 对比面板（两个独立 canvas 并排）────────────────────────────────────
+function WebGLCompare() {
   return (
-    <canvas
-      ref={canvasRef}
-      style={{ width: '100%', height: '100%', display: 'block' }}
-    />
+    <div style={{width:'100%',height:'100%',display:'flex',position:'relative'}}>
+      <div style={{flex:1,position:'relative',overflow:'hidden'}}>
+        <WebGLOldPanel />
+        <div style={{position:'absolute',top:8,left:'50%',transform:'translateX(-50%)',fontSize:10,color:'rgba(239,68,68,0.9)',fontFamily:'monospace',background:'rgba(0,0,0,0.65)',padding:'2px 7px',borderRadius:4,pointerEvents:'none',whiteSpace:'nowrap'}}>旧版 · gl.POINTS</div>
+      </div>
+      <div style={{width:1,background:'rgba(255,255,255,0.18)',flexShrink:0}} />
+      <div style={{flex:1,position:'relative',overflow:'hidden'}}>
+        <WebGLGaussPanel />
+        <div style={{position:'absolute',top:8,left:'50%',transform:'translateX(-50%)',fontSize:10,color:'rgba(168,85,247,0.95)',fontFamily:'monospace',background:'rgba(0,0,0,0.65)',padding:'2px 7px',borderRadius:4,pointerEvents:'none',whiteSpace:'nowrap'}}>高斯模糊 · 4-Pass</div>
+      </div>
+    </div>
   );
 }
 
-// ─── 4. Three.js 3D 地形 ─────────────────────────────────────────────────────
-type Stop = { t: number; r: number; g: number; b: number };
-const STOPS: Stop[] = [
-  {t:0.0,r:0.0,g:0.08,b:0.18},{t:0.06,r:0.0,g:0.28,b:0.52},
-  {t:0.14,r:0.0,g:0.55,b:0.7},{t:0.22,r:0.0,g:0.7,b:0.55},
-  {t:0.32,r:0.1,g:0.78,b:0.25},{t:0.42,r:0.45,g:0.82,b:0.05},
-  {t:0.52,r:0.78,g:0.75,b:0.0},{t:0.62,r:0.95,g:0.6,b:0.0},
-  {t:0.72,r:1.0,g:0.4,b:0.0},{t:0.82,r:1.0,g:0.25,b:0.0},
-  {t:1.0,r:1.0,g:0.08,b:0.0},
-];
-function tColor(t: number): [number,number,number] {
-  t = Math.max(0,Math.min(1,t));
-  let lo=STOPS[0],hi=STOPS[STOPS.length-1];
-  for(let i=0;i<STOPS.length-1;i++) if(t>=STOPS[i].t&&t<=STOPS[i+1].t){lo=STOPS[i];hi=STOPS[i+1];break;}
-  const f=hi.t>lo.t?(t-lo.t)/(hi.t-lo.t):0;
-  return [lo.r+(hi.r-lo.r)*f,lo.g+(hi.g-lo.g)*f,lo.b+(hi.b-lo.b)*f];
-}
-function cubicW(t:number){const a=-0.5,at=Math.abs(t);if(at<=1)return(a+2)*at**3-(a+3)*at**2+1;if(at<2)return a*at**3-5*a*at**2+8*a*at-4*a;return 0;}
-function bicubic(src:number[][],n:number,s:number):number[][]{
-  const d=n*s,dst:number[][]=Array.from({length:d},()=>new Array(d).fill(0));
-  for(let oy=0;oy<d;oy++)for(let ox=0;ox<d;ox++){
-    const sx=(ox/(d-1))*(n-1),sy=(oy/(d-1))*(n-1),ix=Math.floor(sx),iy=Math.floor(sy),fx=sx-ix,fy=sy-iy;
-    let sum=0,ws=0;
-    for(let dy=-1;dy<=2;dy++)for(let dx=-1;dx<=2;dx++){
-      const px=Math.max(0,Math.min(n-1,ix+dx)),py=Math.max(0,Math.min(n-1,iy+dy)),w=cubicW(fx-dx)*cubicW(fy-dy);
-      sum+=src[py][px]*w;ws+=w;
-    }
-    dst[oy][ox]=Math.max(0,ws>0?sum/ws:0);
-  }
-  return dst;
-}
-function gaussBlur(mat:number[][],n:number,sigma:number):number[][]{
-  const size=Math.ceil(sigma*3)*2+1,half=Math.floor(size/2);
-  const k=Array.from({length:size},(_,i)=>Math.exp(-((i-half)**2)/(2*sigma*sigma)));
-  const tmp:number[][]=Array.from({length:n},()=>new Array(n).fill(0));
-  const out:number[][]=Array.from({length:n},()=>new Array(n).fill(0));
-  for(let y=0;y<n;y++)for(let x=0;x<n;x++){let s=0,w=0;for(let d=-half;d<=half;d++){const px=Math.max(0,Math.min(n-1,x+d));s+=mat[y][px]*k[d+half];w+=k[d+half];}tmp[y][x]=s/w;}
-  for(let y=0;y<n;y++)for(let x=0;x<n;x++){let s=0,w=0;for(let d=-half;d<=half;d++){const py=Math.max(0,Math.min(n-1,y+d));s+=tmp[py][x]*k[d+half];w+=k[d+half];}out[y][x]=s/w;}
-  return out;
-}
+// ─── Three.js 3D 地形// ─── Three.js 3D 地形 ─────────────────────────────────────────────────────────
+type Stop={t:number;r:number;g:number;b:number};
+const STOPS:Stop[]=[{t:0.0,r:0.0,g:0.08,b:0.18},{t:0.06,r:0.0,g:0.28,b:0.52},{t:0.14,r:0.0,g:0.55,b:0.7},{t:0.22,r:0.0,g:0.7,b:0.55},{t:0.32,r:0.1,g:0.78,b:0.25},{t:0.42,r:0.45,g:0.82,b:0.05},{t:0.52,r:0.78,g:0.75,b:0.0},{t:0.62,r:0.95,g:0.6,b:0.0},{t:0.72,r:1.0,g:0.4,b:0.0},{t:0.82,r:1.0,g:0.25,b:0.0},{t:1.0,r:1.0,g:0.08,b:0.0}];
+function tColor(t:number):[number,number,number]{t=Math.max(0,Math.min(1,t));let lo=STOPS[0],hi=STOPS[STOPS.length-1];for(let i=0;i<STOPS.length-1;i++)if(t>=STOPS[i].t&&t<=STOPS[i+1].t){lo=STOPS[i];hi=STOPS[i+1];break;}const f=hi.t>lo.t?(t-lo.t)/(hi.t-lo.t):0;return[lo.r+(hi.r-lo.r)*f,lo.g+(hi.g-lo.g)*f,lo.b+(hi.b-lo.b)*f];}
+function cW(t:number){const a=-0.5,at=Math.abs(t);if(at<=1)return(a+2)*at**3-(a+3)*at**2+1;if(at<2)return a*at**3-5*a*at**2+8*a*at-4*a;return 0;}
+function bicubic(src:number[][],n:number,s:number):number[][]{const d=n*s,dst:number[][]=Array.from({length:d},()=>new Array(d).fill(0));for(let oy=0;oy<d;oy++)for(let ox=0;ox<d;ox++){const sx=(ox/(d-1))*(n-1),sy=(oy/(d-1))*(n-1),ix=Math.floor(sx),iy=Math.floor(sy),fx=sx-ix,fy=sy-iy;let sum=0,ws=0;for(let dy=-1;dy<=2;dy++)for(let dx=-1;dx<=2;dx++){const px=Math.max(0,Math.min(n-1,ix+dx)),py=Math.max(0,Math.min(n-1,iy+dy)),w=cW(fx-dx)*cW(fy-dy);sum+=src[py][px]*w;ws+=w;}dst[oy][ox]=Math.max(0,ws>0?sum/ws:0);}return dst;}
+function gBlur(mat:number[][],n:number,sigma:number):number[][]{const sz=Math.ceil(sigma*3)*2+1,half=Math.floor(sz/2);const k=Array.from({length:sz},(_,i)=>Math.exp(-((i-half)**2)/(2*sigma*sigma)));const tmp:number[][]=Array.from({length:n},()=>new Array(n).fill(0));const out:number[][]=Array.from({length:n},()=>new Array(n).fill(0));for(let y=0;y<n;y++)for(let x=0;x<n;x++){let s=0,w=0;for(let d=-half;d<=half;d++){const px=Math.max(0,Math.min(n-1,x+d));s+=mat[y][px]*k[d+half];w+=k[d+half];}tmp[y][x]=s/w;}for(let y=0;y<n;y++)for(let x=0;x<n;x++){let s=0,w=0;for(let d=-half;d<=half;d++){const py=Math.max(0,Math.min(n-1,y+d));s+=tmp[py][x]*k[d+half];w+=k[d+half];}out[y][x]=s/w;}return out;}
 
 function ThreeTerrain() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
+  const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const W = canvas.offsetWidth, H = canvas.offsetHeight;
-    canvas.width = W * devicePixelRatio; canvas.height = H * devicePixelRatio;
-
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setPixelRatio(devicePixelRatio);
-    renderer.setSize(W, H, false);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
-    renderer.shadowMap.enabled = true;
-
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#090f1a');
-    scene.fog = new THREE.Fog('#090f1a', 22, 40);
-
-    const camera = new THREE.PerspectiveCamera(42, W/H, 0.1, 100);
-    camera.position.set(8, 7, 8);
-
-    // 灯光
-    scene.add(new THREE.AmbientLight(0xffffff, 0.3));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.3);
-    sun.position.set(8,12,6); sun.castShadow=true; scene.add(sun);
-    const fill = new THREE.DirectionalLight(0x4488ff, 0.45);
-    fill.position.set(-5,4,-4); scene.add(fill);
-
-    // 底板
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(12,12), new THREE.MeshBasicMaterial({color:'#0a1520'}));
+    const canvas=ref.current; if(!canvas) return;
+    const W=canvas.offsetWidth,H=canvas.offsetHeight;
+    canvas.width=W*devicePixelRatio; canvas.height=H*devicePixelRatio;
+    const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+    renderer.setPixelRatio(devicePixelRatio); renderer.setSize(W,H,false);
+    renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.1; renderer.shadowMap.enabled=true;
+    const scene=new THREE.Scene(); scene.background=new THREE.Color('#090f1a'); scene.fog=new THREE.Fog('#090f1a',22,40);
+    const camera=new THREE.PerspectiveCamera(42,W/H,0.1,100); camera.position.set(8,7,8);
+    scene.add(new THREE.AmbientLight(0xffffff,0.3));
+    const sun=new THREE.DirectionalLight(0xffffff,1.3); sun.position.set(8,12,6); sun.castShadow=true; scene.add(sun);
+    const fill=new THREE.DirectionalLight(0x4488ff,0.45); fill.position.set(-5,4,-4); scene.add(fill);
+    const floor=new THREE.Mesh(new THREE.PlaneGeometry(12,12),new THREE.MeshBasicMaterial({color:'#0a1520'}));
     floor.rotation.x=-Math.PI/2; floor.position.y=-0.02; scene.add(floor);
-    const grid = new THREE.GridHelper(12,48,0x1a3050,0x0f1d2e);
-    grid.position.y=-0.01; scene.add(grid);
-
-    // 地形
+    const gridHelper = new THREE.GridHelper(12,48,0x1a3050,0x0f1d2e); gridHelper.position.y=-0.01; scene.add(gridHelper);
     let g2d:number[][]=Array.from({length:GRID},(_,i)=>MATRIX.slice(i*GRID,(i+1)*GRID));
-    g2d=gaussBlur(g2d,GRID,0.5);
-    const sm=bicubic(g2d,GRID,3);
-    const N=GRID*3;
-    let dMax=1;
-    for(let y=0;y<N;y++)for(let x=0;x<N;x++)dMax=Math.max(dMax,sm[y][x]);
-
-    const geo=new THREE.PlaneGeometry(10,10,N-1,N-1);
-    geo.rotateX(-Math.PI/2);
-    const pos=geo.attributes.position as THREE.BufferAttribute;
-    const cols=new Float32Array(pos.count*3);
-    for(let i=0;i<pos.count;i++){
-      const ix=i%N,iy=Math.floor(i/N);
-      const raw=sm[Math.min(iy,N-1)][Math.min(ix,N-1)];
-      const t=Math.pow(Math.min(raw/dMax,1),0.75);
-      pos.setY(i,t*4.5);
-      const [r,g,b]=tColor(t);
-      cols[i*3]=r;cols[i*3+1]=g;cols[i*3+2]=b;
-    }
-    geo.setAttribute('color',new THREE.BufferAttribute(cols,3));
-    geo.computeVertexNormals();
-
+    g2d=gBlur(g2d,GRID,0.5); const sm=bicubic(g2d,GRID,3); const N=GRID*3;
+    let dMax=1; for(let y=0;y<N;y++)for(let x=0;x<N;x++)dMax=Math.max(dMax,sm[y][x]);
+    const geo=new THREE.PlaneGeometry(10,10,N-1,N-1); geo.rotateX(-Math.PI/2);
+    const pos=geo.attributes.position as THREE.BufferAttribute; const cols=new Float32Array(pos.count*3);
+    for(let i=0;i<pos.count;i++){const ix=i%N,iy=Math.floor(i/N);const raw=sm[Math.min(iy,N-1)][Math.min(ix,N-1)];const t=Math.pow(Math.min(raw/dMax,1),0.75);pos.setY(i,t*4.5);const[r,g,b]=tColor(t);cols[i*3]=r;cols[i*3+1]=g;cols[i*3+2]=b;}
+    geo.setAttribute('color',new THREE.BufferAttribute(cols,3)); geo.computeVertexNormals();
     const mat=new THREE.MeshStandardMaterial({vertexColors:true,side:THREE.DoubleSide,roughness:0.55,metalness:0});
-    const mesh=new THREE.Mesh(geo,mat);
-    mesh.castShadow=true; mesh.receiveShadow=true; scene.add(mesh);
-
-    const controls=new OrbitControls(camera,canvas);
-    controls.enableDamping=true; controls.dampingFactor=0.05;
-    controls.minDistance=4; controls.maxDistance=20;
-    controls.target.set(0,1.5,0); controls.update();
-
-    let id:number;
-    const animate=()=>{id=requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);};
-    animate();
-
-    const ro=new ResizeObserver(()=>{
-      const nw=canvas.offsetWidth,nh=canvas.offsetHeight;
-      camera.aspect=nw/nh; camera.updateProjectionMatrix();
-      renderer.setSize(nw,nh,false);
-    });
-    ro.observe(canvas);
-
-    return ()=>{cancelAnimationFrame(id);ro.disconnect();controls.dispose();renderer.dispose();};
+    const mesh=new THREE.Mesh(geo,mat); mesh.castShadow=true; mesh.receiveShadow=true; scene.add(mesh);
+    const controls=new OrbitControls(camera,canvas); controls.enableDamping=true; controls.dampingFactor=0.05; controls.minDistance=4; controls.maxDistance=20; controls.target.set(0,1.5,0); controls.update();
+    let id:number; const animate=()=>{id=requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}; animate();
+    const ro=new ResizeObserver(()=>{const nw=canvas.offsetWidth,nh=canvas.offsetHeight;camera.aspect=nw/nh;camera.updateProjectionMatrix();renderer.setSize(nw,nh,false);}); ro.observe(canvas);
+    return()=>{cancelAnimationFrame(id);ro.disconnect();controls.dispose();renderer.dispose();};
   }, []);
-
-  return <canvas ref={canvasRef} style={{width:'100%',height:'100%',display:'block'}} />;
+  return <canvas ref={ref} style={{width:'100%',height:'100%',display:'block'}} />;
 }
 
 // ─── 面板卡片 ────────────────────────────────────────────────────────────────
-interface PanelProps {
-  title: string;
-  subtitle: string;
-  badge: string;
-  badgeColor: string;
-  children: React.ReactNode;
-  highlight?: boolean;
-}
-function Panel({ title, subtitle, badge, badgeColor, children, highlight }: PanelProps) {
-  const border = highlight ? 'rgba(52,211,153,0.35)' : 'rgba(255,255,255,0.08)';
+function Panel({title,subtitle,badge,badgeColor,children,highlight,tag}:{title:string;subtitle:string;badge:string;badgeColor:string;children:React.ReactNode;highlight?:boolean;tag?:string}) {
+  const border=highlight?'rgba(52,211,153,0.35)':'rgba(255,255,255,0.08)';
   return (
-    <div className="rounded-2xl overflow-hidden flex flex-col"
-      style={{ border:`1px solid ${border}`, background:'rgba(255,255,255,0.02)',
-               boxShadow: highlight ? '0 0 32px rgba(52,211,153,0.07)' : undefined }}>
-      <div className="px-4 py-3 border-b flex items-center justify-between gap-3"
-        style={{ borderColor: border }}>
+    <div className="rounded-2xl overflow-hidden flex flex-col" style={{border:`1px solid ${border}`,background:'rgba(255,255,255,0.02)',boxShadow:highlight?'0 0 32px rgba(52,211,153,0.07)':undefined}}>
+      <div className="px-4 py-3 border-b flex items-center justify-between gap-3" style={{borderColor:border}}>
         <div>
           <div className="flex items-center gap-2">
-            {highlight && <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />}
+            {highlight&&<span className="w-2 h-2 rounded-full bg-emerald-400 inline-block"/>}
             <span className="text-sm font-semibold text-white">{title}</span>
+            {tag&&<span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-amber-500/20 text-amber-400 border border-amber-500/30">{tag}</span>}
           </div>
           <div className="text-[11px] text-slate-500 mt-0.5 font-mono">{subtitle}</div>
         </div>
-        <span className="px-2.5 py-1 rounded-full text-[11px] font-mono shrink-0"
-          style={{ background: badgeColor + '18', color: badgeColor, border: `1px solid ${badgeColor}40` }}>
-          {badge}
-        </span>
+        <span className="px-2.5 py-1 rounded-full text-[11px] font-mono shrink-0" style={{background:badgeColor+'18',color:badgeColor,border:`1px solid ${badgeColor}40`}}>{badge}</span>
       </div>
-      <div style={{ height: 340, position: 'relative', overflow: 'hidden' }}>
-        {children}
-      </div>
+      <div style={{height:320,position:'relative',overflow:'hidden'}}>{children}</div>
     </div>
   );
 }
@@ -503,114 +488,83 @@ function Panel({ title, subtitle, badge, badgeColor, children, highlight }: Pane
 // ─── 主页面 ──────────────────────────────────────────────────────────────────
 export default function Home() {
   return (
-    <div className="min-h-screen text-slate-200"
-      style={{ background: 'linear-gradient(160deg,#060a10 0%,#0b1220 60%,#060a10 100%)' }}>
-
-      <header className="border-b border-white/6 sticky top-0 z-20 backdrop-blur-sm"
-        style={{ background: 'rgba(6,10,16,0.92)' }}>
+    <div className="min-h-screen text-slate-200" style={{background:'linear-gradient(160deg,#060a10 0%,#0b1220 60%,#060a10 100%)'}}>
+      <header className="border-b border-white/6 sticky top-0 z-20 backdrop-blur-sm" style={{background:'rgba(6,10,16,0.92)'}}>
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg flex items-center justify-center"
-              style={{ background: 'linear-gradient(135deg,#4f9cf9,#7c3aed)' }}>
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <circle cx="4" cy="4" r="2.5" fill="white" fillOpacity="0.9"/>
-                <circle cx="10" cy="9" r="2" fill="white" fillOpacity="0.6"/>
-                <circle cx="7" cy="11.5" r="1.5" fill="white" fillOpacity="0.4"/>
-              </svg>
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{background:'linear-gradient(135deg,#4f9cf9,#7c3aed)'}}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="4" cy="4" r="2.5" fill="white" fillOpacity="0.9"/><circle cx="10" cy="9" r="2" fill="white" fillOpacity="0.6"/><circle cx="7" cy="11.5" r="1.5" fill="white" fillOpacity="0.4"/></svg>
             </div>
             <span className="font-semibold text-sm text-white">HeatMap Renderer</span>
-            <span className="text-slate-600 text-sm">/ 四种渲染技术对比</span>
+            <span className="text-slate-600 text-sm">/ 五种渲染技术</span>
           </div>
           <div className="flex items-center gap-4 text-xs text-slate-500">
-            <span className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />Google Maps
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />Canvas 2D
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />WebGL 2D
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />Three.js 3D
-            </span>
+            {[['bg-blue-400','Maps'],['bg-yellow-400','Canvas 2D'],['bg-red-400','WebGL 旧'],['bg-purple-400','WebGL 高斯'],['bg-emerald-400','Three.js']].map(([c,l])=>(
+              <span key={l} className="flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full ${c}`}/>{l}</span>
+            ))}
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">四种热力图渲染技术</h1>
-          <p className="text-slate-400 text-sm mt-1 max-w-3xl">
-            相同的 32×32 压力传感器数据，分别用 Google Maps、Canvas 2D、WebGL 2D、Three.js 3D 四种方式渲染。
-          </p>
+          <h1 className="text-2xl font-bold text-white tracking-tight">热力图渲染技术全对比</h1>
+          <p className="text-slate-400 text-sm mt-1 max-w-3xl">相同的 32×32 压力传感器数据，五种渲染方式同屏对比。重点看 WebGL 旧版 vs WebGL 高斯模糊版的差异。</p>
         </div>
 
-        <div className="grid grid-cols-2 gap-5">
-          <Panel title="Google Maps 热力图" subtitle="HeatmapLayer · LatLng 地理坐标映射"
-            badge="Maps API" badgeColor="#4285f4">
+        {/* 上排：3格 */}
+        <div className="grid grid-cols-2 gap-4">
+          <Panel title="Google Maps" subtitle="HeatmapLayer · 地理坐标映射" badge="Maps API" badgeColor="#4285f4">
             <MapHeatmap />
           </Panel>
-
-          <Panel title="Canvas 2D 热力图" subtitle="离屏圆形叠加 · getImageData 颜色映射"
-            badge="Canvas 2D" badgeColor="#f59e0b">
+          <Panel title="Canvas 2D" subtitle="shadowBlur 离屏叠加 · CPU 颜色映射" badge="Canvas 2D" badgeColor="#f59e0b">
             <Canvas2DHeatmap />
           </Panel>
 
-          <Panel title="WebGL 2D 热力图" subtitle="双 Pass FBO · GLSL 颜色映射 · GPU 渲染"
-            badge="WebGL" badgeColor="#a855f7">
-            <WebGLHeatmap />
-          </Panel>
+        </div>
 
-          <Panel title="Three.js 3D 地形" subtitle="meshStandardMaterial · 动态归一化 · 双方向光"
-            badge="Three.js" badgeColor="#34d399" highlight>
+        {/* 下排：2格 */}
+        <div className="grid grid-cols-2 gap-4">
+          <Panel title="WebGL 对比：旧版 vs 高斯模糊" subtitle="左：gl.POINTS smoothstep · 右：4-Pass 高斯模糊（同一 WebGL context）" badge="WebGL" badgeColor="#a855f7" highlight tag="NEW">
+            <WebGLCompare />
+          </Panel>
+          <Panel title="Three.js 3D 地形" subtitle="meshStandardMaterial · 动态归一化 · 双方向光" badge="Three.js" badgeColor="#34d399" highlight>
             <ThreeTerrain />
           </Panel>
         </div>
 
-        {/* 技术对比表 */}
-        <div className="rounded-2xl border border-white/8 overflow-hidden"
-          style={{ background: 'rgba(255,255,255,0.02)' }}>
-          <div className="px-5 py-3.5 border-b border-white/6">
-            <span className="text-sm font-medium text-white">技术特性对比</span>
+        {/* 高斯模糊原理说明 */}
+        <div className="rounded-2xl border border-purple-500/20 p-5 space-y-4" style={{background:'rgba(168,85,247,0.04)'}}>
+          <div className="flex items-center gap-2">
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="text-purple-400"><path d="M7.5 1v13M1 7.5h13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+            <span className="text-sm font-semibold text-purple-300">WebGL 高斯模糊 4-Pass 原理</span>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs font-mono">
-              <thead>
-                <tr className="border-b border-white/6 text-slate-400">
-                  <th className="px-4 py-2.5 text-left font-normal">特性</th>
-                  <th className="px-4 py-2.5 text-left font-normal text-blue-400">Google Maps</th>
-                  <th className="px-4 py-2.5 text-left font-normal text-yellow-400">Canvas 2D</th>
-                  <th className="px-4 py-2.5 text-left font-normal text-purple-400">WebGL 2D</th>
-                  <th className="px-4 py-2.5 text-left font-normal text-emerald-400">Three.js 3D</th>
-                </tr>
-              </thead>
-              <tbody className="text-slate-400">
-                {[
-                  ['渲染维度', '2D 地图叠加', '2D 平面', '2D 平面', '3D 地形'],
-                  ['GPU 加速', '是（地图底层）', '否（CPU 像素操作）', '是（GLSL Shader）', '是（WebGL）'],
-                  ['实时性能', '中（受地图限制）', '低（getImageData 慢）', '高（纯 GPU）', '高（顶点更新）'],
-                  ['地理信息', '有（真实坐标）', '无', '无', '无'],
-                  ['交互方式', '地图平移/缩放', '静态', '静态', '3D 旋转/缩放'],
-                  ['颜色自定义', '有限（gradient 数组）', '完全自定义', '完全自定义（GLSL）', '完全自定义'],
-                  ['适用场景', '地理位置热力', '简单数据可视化', '高性能实时热力', '压力分布 3D 展示'],
-                ].map(([feat, ...vals], i) => (
-                  <tr key={i} className="border-b border-white/4 hover:bg-white/[0.02]">
-                    <td className="px-4 py-2 text-slate-500">{feat}</td>
-                    <td className="px-4 py-2 text-blue-400/70">{vals[0]}</td>
-                    <td className="px-4 py-2 text-yellow-400/70">{vals[1]}</td>
-                    <td className="px-4 py-2 text-purple-400/70">{vals[2]}</td>
-                    <td className="px-4 py-2 text-emerald-400/90 font-medium">{vals[3]}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="grid grid-cols-4 gap-3">
+            {[
+              {step:'Pass 1',icon:'●',color:'#60a5fa',title:'高斯光斑',desc:'每个数据点渲染为小圆点（半径28px），用高斯函数 exp(-d²/2σ²) 衰减，而非 smoothstep 硬截断'},
+              {step:'Pass 2',icon:'↔',color:'#a78bfa',title:'水平模糊',desc:'9-tap 可分离高斯卷积，水平方向（步长 1/W），权重 [0.227, 0.194, 0.121, 0.054, 0.016]'},
+              {step:'Pass 3',icon:'↕',color:'#c084fc',title:'垂直模糊',desc:'9-tap 可分离高斯卷积，垂直方向（步长 1/H），与 Pass2 合并等效于 2D 高斯模糊'},
+              {step:'Pass 4',icon:'🎨',color:'#34d399',title:'颜色映射',desc:'读取模糊后的 alpha 通道，映射到深紫→蓝紫→青绿→黄绿→黄→红的颜色方案'},
+            ].map((p,i)=>(
+              <div key={i} className="rounded-xl border p-3 space-y-1.5" style={{borderColor:p.color+'30',background:p.color+'08'}}>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono px-1.5 py-0.5 rounded" style={{background:p.color+'20',color:p.color}}>{p.step}</span>
+                  <span className="text-xs font-semibold" style={{color:p.color}}>{p.title}</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">{p.desc}</p>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-start gap-2 pt-1 border-t border-white/6">
+            <span className="text-[11px] text-slate-500 leading-relaxed">
+              <span className="text-purple-400 font-mono">可分离高斯模糊</span>：2D 高斯核 G(x,y) = G(x)·G(y)，可以分解为水平+垂直两次 1D 卷积。
+              N×N 核的计算量从 O(N²) 降到 O(2N)，对 9-tap 核来说快 4.5 倍。
+              多次迭代（3次）相当于更大的 σ，效果等同于 Canvas 2D 的 shadowBlur。
+            </span>
           </div>
         </div>
 
-        <div className="text-center text-xs text-slate-700 pb-4">
-          HeatMap Rendering Comparison · Google Maps · Canvas 2D · WebGL · Three.js
-        </div>
+        <div className="text-center text-xs text-slate-700 pb-4">HeatMap Rendering · Google Maps · Canvas 2D · WebGL · Three.js</div>
       </main>
     </div>
   );
