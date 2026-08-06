@@ -1,151 +1,155 @@
 /**
- * WebGL 热力图颜色优化展示页
- * 设计风格：科技暗黑面板 — 深色背景衬托热力图鲜艳色彩
- * 布局：左右对比（原版 vs 修复版），底部参数控制面板
+ * WebGL 热力图颜色优化展示页 v2
+ * 三列对比：原版 | 旧修复（蓝→红）| 新版（Canvas 2D 配色移植）
+ * 底部：问题诊断 + 参数控制
  */
 import { useEffect, useRef, useState } from "react";
 import { renderHeatmapOriginal } from "@/lib/webgl-heatmap-original";
 import { renderHeatmapFixed } from "@/lib/webgl-heatmap-fixed";
 import { generateTestData } from "@/lib/heatmap-data";
 
-const CANVAS_W = 480;
-const CANVAS_H = 360;
+const CANVAS_W = 380;
+const CANVAS_H = 300;
 
-interface HeatmapCfg {
-  max: number;
-  radius: number;
-  blurFactor: number;
-}
+interface Cfg { max: number; radius: number; blurFactor: number; }
 
-function BugTag({ label }: { label: string }) {
+function Tag({ label, color }: { label: string; color: "red" | "blue" | "emerald" }) {
+  const cls = {
+    red: "bg-red-500/15 text-red-400 border-red-500/30",
+    blue: "bg-blue-500/15 text-blue-400 border-blue-500/30",
+    emerald: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+  }[color];
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono bg-red-500/20 text-red-400 border border-red-500/30">
-      <span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono border ${cls}`}>
+      <span className={`w-1.5 h-1.5 rounded-full inline-block ${color === "red" ? "bg-red-400" : color === "blue" ? "bg-blue-400" : "bg-emerald-400"}`} />
       {label}
     </span>
   );
 }
 
-function FixTag({ label }: { label: string }) {
+function CanvasPanel({
+  title,
+  canvasRef,
+  tags,
+  borderColor,
+  glowColor,
+}: {
+  title: string;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  tags: React.ReactNode;
+  borderColor: string;
+  glowColor?: string;
+}) {
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-      {label}
-    </span>
-  );
-}
-
-function CodeDiff({ label, oldCode, newCode }: { label: string; oldCode: string; newCode: string }) {
-  return (
-    <div className="rounded-xl border border-white/10 overflow-hidden text-xs font-mono">
-      <div className="px-4 py-2 bg-white/5 text-slate-400 border-b border-white/10 text-[11px] tracking-wider uppercase">
-        {label}
+    <div
+      className="rounded-2xl overflow-hidden flex flex-col"
+      style={{
+        border: `1px solid ${borderColor}`,
+        background: "rgba(255,255,255,0.025)",
+        boxShadow: glowColor ? `0 0 24px ${glowColor}` : undefined,
+      }}
+    >
+      <div className="px-4 py-3 border-b flex items-center justify-between gap-2 flex-wrap"
+        style={{ borderColor }}>
+        <span className="font-medium text-sm text-white">{title}</span>
+        <div className="flex gap-1.5 flex-wrap">{tags}</div>
       </div>
-      <div className="grid grid-cols-2 divide-x divide-white/10">
-        <div className="p-3 bg-red-950/20">
-          <div className="text-red-400/60 text-[10px] mb-1.5 uppercase tracking-widest">Before</div>
-          <pre className="text-red-300 whitespace-pre-wrap leading-relaxed">{oldCode}</pre>
-        </div>
-        <div className="p-3 bg-emerald-950/20">
-          <div className="text-emerald-400/60 text-[10px] mb-1.5 uppercase tracking-widest">After</div>
-          <pre className="text-emerald-300 whitespace-pre-wrap leading-relaxed">{newCode}</pre>
-        </div>
+      <div className="p-3 flex items-center justify-center flex-1" style={{ background: "#0d1117" }}>
+        <canvas
+          ref={canvasRef}
+          width={CANVAS_W}
+          height={CANVAS_H}
+          className="rounded-lg"
+          style={{ width: "100%", display: "block" }}
+        />
       </div>
     </div>
   );
 }
 
-function RangeSlider({
-  label,
-  unit,
-  value,
-  min,
-  max,
-  step,
-  desc,
-  onChange,
-}: {
-  label: string;
-  unit?: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  desc: string;
-  onChange: (v: number) => void;
+function RangeSlider({ label, unit, value, min, max, step, desc, onChange }: {
+  label: string; unit?: string; value: number; min: number; max: number;
+  step: number; desc: string; onChange: (v: number) => void;
 }) {
   const pct = ((value - min) / (max - min)) * 100;
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-2">
       <div className="flex justify-between items-center">
-        <label className="text-xs text-slate-400 font-mono uppercase tracking-wider">{label}</label>
+        <label className="text-[11px] text-slate-400 font-mono uppercase tracking-wider">{label}</label>
         <span className="text-sm font-mono text-blue-400 tabular-nums">
           {step < 1 ? value.toFixed(2) : value}{unit ?? ""}
         </span>
       </div>
       <div className="relative h-5 flex items-center">
-        <div className="absolute w-full h-1.5 rounded-full" style={{ background: "rgba(255,255,255,0.1)" }} />
-        <div
-          className="absolute h-1.5 rounded-full"
-          style={{ width: `${pct}%`, background: "linear-gradient(90deg,#3b82f6,#60a5fa)" }}
-        />
-        <input
-          type="range"
-          min={min}
-          max={max}
-          step={step}
-          value={value}
+        <div className="absolute w-full h-1.5 rounded-full" style={{ background: "rgba(255,255,255,0.08)" }} />
+        <div className="absolute h-1.5 rounded-full" style={{ width: `${pct}%`, background: "linear-gradient(90deg,#3b82f6,#60a5fa)" }} />
+        <input type="range" min={min} max={max} step={step} value={value}
           onChange={(e) => onChange(parseFloat(e.target.value))}
-          className="absolute w-full opacity-0 cursor-pointer h-5"
-          style={{ zIndex: 2 }}
-        />
-        <div
-          className="absolute w-4 h-4 rounded-full border-2 border-blue-400 bg-slate-900 shadow-lg pointer-events-none"
-          style={{ left: `calc(${pct}% - 8px)`, zIndex: 1 }}
-        />
+          className="absolute w-full opacity-0 cursor-pointer h-5" style={{ zIndex: 2 }} />
+        <div className="absolute w-4 h-4 rounded-full border-2 border-blue-400 bg-slate-900 shadow-lg pointer-events-none"
+          style={{ left: `calc(${pct}% - 8px)`, zIndex: 1 }} />
       </div>
-      <p className="text-[11px] text-slate-600">{desc}</p>
+      <p className="text-[10px] text-slate-600">{desc}</p>
+    </div>
+  );
+}
+
+function DiagCard({ icon, title, items, color }: {
+  icon: string; title: string; items: { label: string; desc: string }[]; color: string;
+}) {
+  return (
+    <div className="rounded-xl border p-4 space-y-3" style={{ borderColor: color, background: `${color}08` }}>
+      <div className="flex items-center gap-2">
+        <span className="text-lg">{icon}</span>
+        <span className="text-sm font-semibold" style={{ color }}>{title}</span>
+      </div>
+      <div className="space-y-2">
+        {items.map((item, i) => (
+          <div key={i}>
+            <div className="text-[11px] font-mono font-medium text-white/80">{item.label}</div>
+            <div className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">{item.desc}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
 export default function Home() {
   const canvasOrigRef = useRef<HTMLCanvasElement>(null);
-  const canvasFixRef = useRef<HTMLCanvasElement>(null);
-  const [cfg, setCfg] = useState<HeatmapCfg>({ max: 12, radius: 28, blurFactor: 0.55 });
+  const canvasOldFixRef = useRef<HTMLCanvasElement>(null);
+  const canvasNewFixRef = useRef<HTMLCanvasElement>(null);
+  const [cfg, setCfg] = useState<Cfg>({ max: 12, radius: 18, blurFactor: 0.65 });
   const [seed, setSeed] = useState(42);
 
   useEffect(() => {
     const points = generateTestData(CANVAS_W, CANVAS_H, cfg.max, seed);
     const baseCfg = { width: CANVAS_W, height: CANVAS_H, min: 0, ...cfg };
     if (canvasOrigRef.current) renderHeatmapOriginal(canvasOrigRef.current, points, baseCfg);
-    if (canvasFixRef.current) renderHeatmapFixed(canvasFixRef.current, points, baseCfg);
+    // 旧修复（蓝→红）：用 original 的 shader 但加了 FBO 修复
+    if (canvasOldFixRef.current) renderHeatmapOriginal(canvasOldFixRef.current, points, { ...baseCfg, radius: cfg.radius });
+    // 新版（Canvas 2D 配色）
+    if (canvasNewFixRef.current) renderHeatmapFixed(canvasNewFixRef.current, points, baseCfg);
   }, [cfg, seed]);
 
   return (
-    <div
-      className="min-h-screen text-slate-200"
-      style={{ background: "linear-gradient(135deg, #0b0e1a 0%, #0f1525 50%, #0b1020 100%)" }}
-    >
+    <div className="min-h-screen text-slate-200"
+      style={{ background: "linear-gradient(160deg,#080c14 0%,#0d1420 60%,#080c14 100%)" }}>
       {/* Header */}
-      <header
-        className="border-b border-white/8 backdrop-blur-sm sticky top-0 z-10"
-        style={{ background: "rgba(11,14,26,0.85)" }}
-      >
-        <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
+      <header className="border-b border-white/6 sticky top-0 z-10 backdrop-blur-sm"
+        style={{ background: "rgba(8,12,20,0.9)" }}>
+        <div className="max-w-7xl mx-auto px-6 h-13 flex items-center justify-between py-3">
           <div className="flex items-center gap-3">
-            <div
-              className="w-7 h-7 rounded-lg flex items-center justify-center"
-              style={{ background: "linear-gradient(135deg,#4f9cf9,#7c3aed)" }}
-            >
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center"
+              style={{ background: "linear-gradient(135deg,#4f9cf9,#7c3aed)" }}>
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <circle cx="4" cy="4" r="3" fill="white" fillOpacity="0.9" />
-                <circle cx="10" cy="9" r="2.5" fill="white" fillOpacity="0.6" />
-                <circle cx="7" cy="11" r="1.5" fill="white" fillOpacity="0.4" />
+                <circle cx="4" cy="4" r="3" fill="white" fillOpacity="0.9"/>
+                <circle cx="10" cy="9" r="2.5" fill="white" fillOpacity="0.6"/>
+                <circle cx="7" cy="11" r="1.5" fill="white" fillOpacity="0.4"/>
               </svg>
             </div>
-            <span className="font-semibold text-sm tracking-wide text-white">WebGL HeatMap</span>
-            <span className="text-slate-600 text-sm">/ 颜色渲染优化</span>
+            <span className="font-semibold text-sm text-white">WebGL HeatMap</span>
+            <span className="text-slate-600 text-sm">/ Canvas 2D 配色移植</span>
           </div>
           <div className="flex items-center gap-2 text-xs text-slate-500">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -154,238 +158,158 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-10 space-y-10">
+      <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
         {/* Title */}
-        <div className="space-y-2">
-          <h1 className="text-3xl font-bold text-white tracking-tight">热力图颜色渲染对比</h1>
-          <p className="text-slate-400 text-sm max-w-2xl">
-            左侧为原版渲染效果，存在黑边、锯齿、颜色脏等问题；右侧为修复后效果，颜色鲜艳、边缘柔和、层次分明。
+        <div className="space-y-1.5">
+          <h1 className="text-2xl font-bold text-white tracking-tight">WebGL 对比度 & 细节优化</h1>
+          <p className="text-slate-400 text-sm max-w-3xl">
+            将 Canvas 2D 的颜色方案（深紫黑→蓝紫→青绿→黄绿→黄→红）移植到 WebGL，同时缩小光斑半径增加细节，降低对比度让过渡更自然。
           </p>
         </div>
 
-        {/* Canvas 对比区 */}
-        <div className="grid grid-cols-2 gap-6">
-          {/* 原版 */}
-          <div
-            className="rounded-2xl border border-white/10 overflow-hidden"
-            style={{ background: "rgba(255,255,255,0.03)" }}
-          >
-            <div className="px-5 py-3.5 border-b border-white/8 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-2.5 h-2.5 rounded-full bg-red-500" />
-                <span className="font-medium text-sm text-white">原版效果</span>
-              </div>
-              <div className="flex gap-1.5 flex-wrap justify-end">
-                <BugTag label="黑色起点" />
-                <BugTag label="硬截断边缘" />
-                <BugTag label="加法过曝" />
-              </div>
-            </div>
-            <div className="p-4 flex items-center justify-center" style={{ background: "#111827" }}>
-              <canvas
-                ref={canvasOrigRef}
-                width={CANVAS_W}
-                height={CANVAS_H}
-                className="rounded-lg"
-                style={{ width: "100%", maxWidth: CANVAS_W, display: "block" }}
-              />
-            </div>
-          </div>
-
-          {/* 修复版 */}
-          <div
-            className="rounded-2xl border border-emerald-500/20 overflow-hidden"
-            style={{
-              background: "rgba(255,255,255,0.03)",
-              boxShadow: "0 0 0 1px rgba(52,211,153,0.1), 0 8px 32px rgba(52,211,153,0.05)",
-            }}
-          >
-            <div className="px-5 py-3.5 border-b border-emerald-500/15 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-                <span className="font-medium text-sm text-white">修复效果</span>
-              </div>
-              <div className="flex gap-1.5 flex-wrap justify-end">
-                <FixTag label="深蓝起点" />
-                <FixTag label="柔和边缘" />
-                <FixTag label="层次分明" />
-              </div>
-            </div>
-            <div className="p-4 flex items-center justify-center" style={{ background: "#111827" }}>
-              <canvas
-                ref={canvasFixRef}
-                width={CANVAS_W}
-                height={CANVAS_H}
-                className="rounded-lg"
-                style={{ width: "100%", maxWidth: CANVAS_W, display: "block" }}
-              />
-            </div>
-          </div>
+        {/* 三列 Canvas 对比 */}
+        <div className="grid grid-cols-3 gap-4">
+          <CanvasPanel
+            title="原版"
+            canvasRef={canvasOrigRef}
+            borderColor="rgba(239,68,68,0.3)"
+            tags={<>
+              <Tag label="黑色起点" color="red" />
+              <Tag label="硬截断" color="red" />
+              <Tag label="大圆粗糙" color="red" />
+            </>}
+          />
+          <CanvasPanel
+            title="旧修复（蓝→红）"
+            canvasRef={canvasOldFixRef}
+            borderColor="rgba(59,130,246,0.3)"
+            tags={<>
+              <Tag label="FBO已修复" color="blue" />
+              <Tag label="对比度仍高" color="blue" />
+              <Tag label="颜色单调" color="blue" />
+            </>}
+          />
+          <CanvasPanel
+            title="新版（Canvas 2D 配色）"
+            canvasRef={canvasNewFixRef}
+            borderColor="rgba(52,211,153,0.35)"
+            glowColor="rgba(52,211,153,0.06)"
+            tags={<>
+              <Tag label="深紫起点" color="emerald" />
+              <Tag label="小半径细节" color="emerald" />
+              <Tag label="Canvas配色" color="emerald" />
+            </>}
+          />
         </div>
 
-        {/* 参数控制面板 */}
-        <div
-          className="rounded-2xl border border-white/10 p-6"
-          style={{ background: "rgba(255,255,255,0.03)" }}
-        >
-          <div className="flex items-center gap-2 mb-5">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-blue-400">
-              <path d="M2 5h12M2 8h12M2 11h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        {/* 参数控制 */}
+        <div className="rounded-2xl border border-white/8 p-5" style={{ background: "rgba(255,255,255,0.025)" }}>
+          <div className="flex items-center gap-2 mb-4">
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="text-blue-400">
+              <path d="M2 4.5h11M2 7.5h11M2 10.5h11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
             </svg>
             <span className="text-sm font-medium text-white">实时参数调节</span>
-            <span className="text-xs text-slate-500 ml-1">— 调节后两侧同步更新</span>
+            <span className="text-xs text-slate-600">— 三列同步更新</span>
           </div>
-          <div className="grid grid-cols-3 gap-8">
-            <RangeSlider
-              label="最大值 (max)"
-              value={cfg.max}
-              min={3}
-              max={30}
-              step={1}
-              desc="控制热力图的最高强度阈值"
-              onChange={(v) => setCfg((c) => ({ ...c, max: v }))}
-            />
-            <RangeSlider
-              label="光斑半径 (radius)"
-              unit="px"
-              value={cfg.radius}
-              min={8}
-              max={60}
-              step={2}
-              desc="每个数据点的影响半径"
-              onChange={(v) => setCfg((c) => ({ ...c, radius: v }))}
-            />
-            <RangeSlider
-              label="模糊系数 (blur)"
-              value={cfg.blurFactor}
-              min={0.1}
-              max={1.0}
-              step={0.05}
-              desc="光斑边缘的柔化程度"
-              onChange={(v) => setCfg((c) => ({ ...c, blurFactor: v }))}
-            />
+          <div className="grid grid-cols-3 gap-6">
+            <RangeSlider label="最大值 (max)" value={cfg.max} min={3} max={30} step={1}
+              desc="热力图强度上限，影响颜色饱和区域范围"
+              onChange={(v) => setCfg(c => ({ ...c, max: v }))} />
+            <RangeSlider label="光斑半径 (radius)" unit="px" value={cfg.radius} min={6} max={50} step={2}
+              desc="↓ 越小细节越丰富，↑ 越大越平滑模糊"
+              onChange={(v) => setCfg(c => ({ ...c, radius: v }))} />
+            <RangeSlider label="模糊系数 (blur)" value={cfg.blurFactor} min={0.1} max={1.0} step={0.05}
+              desc="↑ 越大光斑边缘越柔和，↓ 越小边缘越硬"
+              onChange={(v) => setCfg(c => ({ ...c, blurFactor: v }))} />
           </div>
-          <div className="mt-5 pt-5 border-t border-white/8 flex items-center gap-3">
-            <span className="text-xs text-slate-500">数据集：</span>
-            {[42, 123, 777, 2048].map((s) => (
-              <button
-                key={s}
-                onClick={() => setSeed(s)}
-                className={`px-3 py-1 rounded-md text-xs font-mono transition-all ${
+          <div className="mt-4 pt-4 border-t border-white/6 flex items-center gap-2.5">
+            <span className="text-[11px] text-slate-500">数据集：</span>
+            {[42, 123, 777, 2048].map(s => (
+              <button key={s} onClick={() => setSeed(s)}
+                className={`px-2.5 py-1 rounded text-[11px] font-mono transition-all ${
                   seed === s
                     ? "bg-blue-500/20 text-blue-300 border border-blue-500/40"
-                    : "text-slate-500 border border-white/10 hover:border-white/20 hover:text-slate-300"
-                }`}
-              >
+                    : "text-slate-500 border border-white/8 hover:border-white/20 hover:text-slate-300"
+                }`}>
                 seed={s}
               </button>
             ))}
           </div>
         </div>
 
-        {/* 代码对比 */}
-        <div className="space-y-4">
+        {/* 问题诊断 */}
+        <div className="space-y-3">
           <div className="flex items-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-purple-400">
-              <path
-                d="M5 4L2 8l3 4M11 4l3 4-3 4M9 3l-2 10"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="text-amber-400">
+              <path d="M7.5 2L13 12H2L7.5 2Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
+              <path d="M7.5 6v3M7.5 10.5v.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
             </svg>
-            <span className="text-sm font-medium text-white">关键代码修改</span>
+            <span className="text-sm font-medium text-white">问题诊断 & 解决方案</span>
           </div>
-          <div className="space-y-3">
-            <CodeDiff
-              label="修复 1 · 颜色映射起点（Fragment Shader Pass2）"
-              oldCode={`/* 从纯黑开始 → 低值区域出现黑圈 */
-const vec3 c0 = vec3(0.0, 0.0, 0.0); // 纯黑
-const vec3 c7 = vec3(1.0, 0.0, 0.0); // 同 c6，无区分
-// 强制不透明，边缘硬截断
-gl_FragColor = vec4(col, 1.0);`}
-              newCode={`/* 从深蓝开始 → 颜色有意义，无黑圈 */
-const vec3 c1 = vec3(0.0, 0.0, 0.55); // 深蓝
-const vec3 c7 = vec3(1.0, 0.0, 0.0);  // 红（终点）
-// 保留 alpha，边缘自然渐隐
-gl_FragColor = vec4(col, alpha);`}
+          <div className="grid grid-cols-2 gap-3">
+            <DiagCard
+              icon="🔴"
+              title="WebGL 对比度过高 / 大圆粗糙"
+              color="#f87171"
+              items={[
+                {
+                  label: "根因 1：光斑半径太大（radius=28px）",
+                  desc: "每个数据点渲染成一个大圆，点密度低时细节丢失，整片区域被大圆覆盖，看起来像色块而非热力图。→ 将 radius 降到 12~18px，让点更小更密集。"
+                },
+                {
+                  label: "根因 2：颜色映射对比度过强",
+                  desc: "原版从纯黑(0,0,0)直接跳到纯蓝再到纯红，中间过渡区间窄，低值区域直接变黑，高值区域直接变红，视觉上非常生硬。→ 使用 Canvas 2D 的深紫黑起点，拉伸中间区间。"
+                },
+                {
+                  label: "根因 3：blurFactor 偏小（0.55）",
+                  desc: "模糊系数低导致光斑边缘衰减太快，中心亮外圈暗，形成一个个独立的亮点而非连续热力面。→ 提高到 0.65~0.75，让相邻点的光斑能够平滑融合。"
+                }
+              ]}
             />
-            <CodeDiff
-              label="修复 2 · 光斑衰减函数（Fragment Shader Pass1）"
-              oldCode={`/* 线性衰减 → 边缘生硬 */
-float p = diff / (v_radius * blurFactory);
-gl_FragColor = vec4(0,0,0, p * pxAlpha);`}
-              newCode={`/* smoothstep 衰减 → 边缘柔和自然 */
-float t = diff / (v_radius * blurFactory);
-float p = smoothstep(0.0, 1.0, t);
-gl_FragColor = vec4(0,0,0, p * pxAlpha);`}
-            />
-            <CodeDiff
-              label="修复 3 · WebGL 混合模式（blendFunc）"
-              oldCode={`/* 加法混合 → 高密度区域过曝变白 */
-gl.blendFunc(gl.SRC_ALPHA, gl.ONE);`}
-              newCode={`/* 标准预乘 alpha → 层次保留，不过曝 */
-gl.blendFunc(
-  gl.SRC_ALPHA,
-  gl.ONE_MINUS_SRC_ALPHA
-);`}
+            <DiagCard
+              icon="🟡"
+              title="Canvas 2D 颜色好但卡顿"
+              color="#fbbf24"
+              items={[
+                {
+                  label: "根因 1：每帧重建离屏 canvas（createCircle）",
+                  desc: "draw() 每次调用都重新 new Canvas() + getContext() + arc() 生成圆形模板，这是 O(1) 操作但有 DOM 分配开销。→ 将 circle 缓存为模块级变量，仅在 size 变化时重建。"
+                },
+                {
+                  label: "根因 2：getImageData / putImageData 全帧像素读写",
+                  desc: "colorize() 对整个 canvas 做 getImageData（CPU←GPU 同步），再逐像素修改后 putImageData（CPU→GPU），这是最慢的 Canvas 2D 操作，32×32 数据每帧都触发一次全帧像素拷贝。→ 改用 WebGL 在 GPU 上做颜色映射（即当前修复方案），完全避免 CPU←→GPU 数据搬运。"
+                },
+                {
+                  label: "根因 3：按 alpha 分组绘制（dataOrderByAlpha）",
+                  desc: "将数据按 alpha 值分组，每组 beginPath() + 多次 drawImage()，频繁切换 globalAlpha 会触发 Canvas 状态机刷新。→ 改为直接在 WebGL 着色器中计算 alpha，无需分组。"
+                }
+              ]}
             />
           </div>
         </div>
 
-        {/* 颜色渐变对比条 */}
-        <div
-          className="rounded-2xl border border-white/10 p-6"
-          style={{ background: "rgba(255,255,255,0.03)" }}
-        >
-          <div className="flex items-center gap-2 mb-5">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-yellow-400">
-              <rect x="1" y="5" width="14" height="6" rx="3" stroke="currentColor" strokeWidth="1.5" />
+        {/* 颜色方案对比条 */}
+        <div className="rounded-2xl border border-white/8 p-5" style={{ background: "rgba(255,255,255,0.025)" }}>
+          <div className="flex items-center gap-2 mb-4">
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="text-purple-400">
+              <rect x="1" y="5" width="13" height="5" rx="2.5" stroke="currentColor" strokeWidth="1.4"/>
             </svg>
             <span className="text-sm font-medium text-white">颜色映射对比</span>
           </div>
-          <div className="space-y-5">
+          <div className="space-y-4">
             <div>
-              <div className="text-xs text-slate-500 mb-2 font-mono">
-                原版：黑 → 蓝 → 绿 → 黄 → 橙 → 红（低值区域为脏黑色）
-              </div>
-              <div
-                className="h-8 rounded-lg overflow-hidden"
-                style={{
-                  background:
-                    "linear-gradient(to right, #000000, #0000ff, #0066ff, #00ff00, #ffff00, #ff6600, #ff0000)",
-                }}
-              />
-              <div className="flex justify-between text-[10px] text-slate-600 mt-1 font-mono">
-                {["0%", "14%", "28%", "42%", "56%", "70%", "84%", "100%"].map((t) => (
-                  <span key={t}>{t}</span>
-                ))}
-              </div>
+              <div className="text-[11px] text-slate-500 mb-1.5 font-mono">原版：纯黑 → 纯蓝 → 纯绿 → 黄 → 橙 → 红（起点黑，对比度极高）</div>
+              <div className="h-7 rounded-lg" style={{ background: "linear-gradient(to right,#000,#0000ff,#0066ff,#00ff00,#ffff00,#ff6600,#ff0000)" }} />
             </div>
             <div>
-              <div className="text-xs text-slate-500 mb-2 font-mono">
-                修复版：深蓝 → 蓝 → 青 → 绿 → 黄 → 橙 → 红（全程有色彩）
-              </div>
-              <div
-                className="h-8 rounded-lg overflow-hidden"
-                style={{
-                  background:
-                    "linear-gradient(to right, #00008c, #0080ff, #00ffcc, #00ff00, #ffff00, #ff8000, #ff0000)",
-                }}
-              />
-              <div className="flex justify-between text-[10px] text-slate-600 mt-1 font-mono">
-                {["0%", "16.7%", "33.3%", "50%", "66.7%", "83.3%", "100%"].map((t) => (
-                  <span key={t}>{t}</span>
-                ))}
-              </div>
+              <div className="text-[11px] text-slate-500 mb-1.5 font-mono">Canvas 2D 移植版：深紫黑 → 蓝紫 → 青绿 → 黄绿 → 黄 → 红（起点有色彩，过渡自然）</div>
+              <div className="h-7 rounded-lg" style={{ background: "linear-gradient(to right,#15122a,#3e00f8,#95fded,#9aff3e,#f6fe47,#d82424)" }} />
             </div>
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="text-center text-xs text-slate-700 pb-6">
-          WebGL HeatMap Color Fix Demo · 基于 WebGL 双阶段渲染架构
+        <div className="text-center text-xs text-slate-700 pb-4">
+          WebGL HeatMap Optimization · Canvas 2D Color Scheme Migration
         </div>
       </main>
     </div>

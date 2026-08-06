@@ -1,10 +1,17 @@
 // ============================================================
-// 修复版 WebGL 热力图
-// 修复点：
-//   1. 颜色映射从深蓝开始（非纯黑），边缘无黑圈
-//   2. 使用 smoothstep 衰减，光斑更柔和
-//   3. alpha 通道保留，边缘自然渐隐
-//   4. FBO 清屏 + 纹理显式绑定（关键修复）
+// 优化版 WebGL 热力图
+// 移植自 canvas.jsx 的 Intensity 颜色方案：
+//   0.00 -> #15122a (深紫黑)
+//   0.40 -> #3e00f8 (深蓝紫)
+//   0.55 -> #95fded (青绿)
+//   0.70 -> #9aff3e (黄绿)
+//   0.85 -> #f6fe47 (黄)
+//   1.00 -> #d82424 (红)
+// 优化点：
+//   1. 颜色方案与 Canvas 2D 一致，低值深紫而非黑色
+//   2. smoothstep 衰减，光斑柔和
+//   3. 小半径点渲染，细节更丰富
+//   4. FBO 清屏 + 纹理显式绑定
 // ============================================================
 
 const VERTEX_SHADER = `
@@ -37,7 +44,6 @@ const VERTEX_SHADER = `
   }
 `;
 
-// 修复：使用 smoothstep 衰减替代线性衰减，光斑更柔和
 const FRAGMENT_SHADER_FIXED = `
   precision mediump float;
   varying vec2 v_center;
@@ -65,7 +71,6 @@ const FRAGMENT_SHADER_FIXED = `
       if(diff > v_radius * blurFactory) {
         gl_FragColor = vec4(0,0,0,pxAlpha);
       } else {
-        /* smoothstep: t=1 at inner edge, t=0 at outer edge => center strong, edge soft */
         float t = diff / (v_radius * blurFactory);
         float p = smoothstep(0.0, 1.0, t);
         gl_FragColor = vec4(0,0,0,p * pxAlpha);
@@ -81,29 +86,28 @@ const VERTEX_SHADER_PASS2 = `
   void main(void){ gl_Position = a_Position; }
 `;
 
-// 修复：颜色映射从深蓝开始，非线性曲线增加层次感，边缘自然渐隐
-const FRAGMENT_SHADER_PASS2_FIXED = `
+// 移植自 canvas.jsx Intensity.gradient：
+// 0.00 -> #15122a  0.40 -> #3e00f8  0.55 -> #95fded
+// 0.70 -> #9aff3e  0.85 -> #f6fe47  1.00 -> #d82424
+const FRAGMENT_SHADER_PASS2_CANVAS = `
   precision mediump float;
   uniform vec2 u_resolution;
   uniform sampler2D u_Sampler;
 
   vec3 getColorByPercent(float p){
     p = clamp(p, 0.0, 1.0);
-    /* 非线性映射：pow(p,0.65) 拉伸低值区间，让中低值颜色层次更丰富 */
-    float q = pow(p, 0.65);
-    const vec3 c1 = vec3(0.0,  0.0,  0.8 ); /* deep blue */
-    const vec3 c2 = vec3(0.0,  0.6,  1.0 ); /* blue */
-    const vec3 c3 = vec3(0.0,  1.0,  0.6 ); /* cyan-green */
-    const vec3 c4 = vec3(0.5,  1.0,  0.0 ); /* yellow-green */
-    const vec3 c5 = vec3(1.0,  1.0,  0.0 ); /* yellow */
-    const vec3 c6 = vec3(1.0,  0.4,  0.0 ); /* orange */
-    const vec3 c7 = vec3(1.0,  0.0,  0.0 ); /* red */
-    if(q < 0.167) return mix(c1, c2, q / 0.167);
-    if(q < 0.333) return mix(c2, c3, (q-0.167)/0.167);
-    if(q < 0.500) return mix(c3, c4, (q-0.333)/0.167);
-    if(q < 0.667) return mix(c4, c5, (q-0.500)/0.167);
-    if(q < 0.833) return mix(c5, c6, (q-0.667)/0.167);
-    return mix(c6, c7, (q-0.833)/0.167);
+    /* Canvas 2D Intensity 配色方案 */
+    const vec3 c0 = vec3(0.082, 0.071, 0.165); /* #15122a 深紫黑 */
+    const vec3 c1 = vec3(0.243, 0.000, 0.973); /* #3e00f8 深蓝紫 */
+    const vec3 c2 = vec3(0.584, 0.992, 0.929); /* #95fded 青绿 */
+    const vec3 c3 = vec3(0.604, 1.000, 0.243); /* #9aff3e 黄绿 */
+    const vec3 c4 = vec3(0.965, 0.996, 0.278); /* #f6fe47 黄 */
+    const vec3 c5 = vec3(0.847, 0.141, 0.141); /* #d82424 红 */
+    if(p < 0.40) return mix(c0, c1, p / 0.40);
+    if(p < 0.55) return mix(c1, c2, (p-0.40)/0.15);
+    if(p < 0.70) return mix(c2, c3, (p-0.55)/0.15);
+    if(p < 0.85) return mix(c3, c4, (p-0.70)/0.15);
+    return mix(c4, c5, (p-0.85)/0.15);
   }
 
   void main(void){
@@ -111,8 +115,7 @@ const FRAGMENT_SHADER_PASS2_FIXED = `
     float alpha = texture2D(u_Sampler, uv).a;
     if(alpha > 0.01){
       vec3 col = getColorByPercent(alpha);
-      /* 边缘用 smoothstep 渐隐，中高值区域不透明 */
-      float outAlpha = smoothstep(0.01, 0.12, alpha);
+      float outAlpha = smoothstep(0.01, 0.10, alpha);
       gl_FragColor = vec4(col, outAlpha);
     } else {
       gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
@@ -137,7 +140,7 @@ export function renderHeatmapFixed(
   const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
   const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER_FIXED);
   const vs2 = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER_PASS2);
-  const fs2 = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER_PASS2_FIXED);
+  const fs2 = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER_PASS2_CANVAS);
   if (!vs || !fs || !vs2 || !fs2) return;
 
   const prog1 = linkProgram(gl, vs, fs)!;
@@ -179,7 +182,6 @@ function drawHeatmap(
   gl.useProgram(prog1);
   gl.enable(gl.BLEND);
   gl.blendEquation(gl.FUNC_ADD);
-  // 加法混合，让高密度区域 alpha 能叠加到高值
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
 
   const resLoc = gl.getUniformLocation(prog1, 'u_resolution');
@@ -198,7 +200,6 @@ function drawHeatmap(
   gl.uniform1f(blurLoc, cfg.blurFactor ?? 0.55);
   gl.vertexAttrib1f(radiusLoc, cfg.radius + 1);
 
-  // FBO
   const fb = gl.createFramebuffer()!;
   const tex = gl.createTexture()!;
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -214,11 +215,9 @@ function drawHeatmap(
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
   gl.viewport(0, 0, cfg.width, cfg.height);
-  // 关键：绑定 FBO 后必须清屏，否则 alpha 累积饱和
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  // Draw points
   const ATTRS = 3;
   const data = new Float32Array(points.length * ATTRS);
   for (let i = 0; i < points.length; i++) {
@@ -235,10 +234,8 @@ function drawHeatmap(
   gl.vertexAttribPointer(clickLoc, 1, gl.FLOAT, false, ATTRS * 4, 8);
   gl.drawArrays(gl.POINTS, 0, points.length);
 
-  // Pass 2: color mapping
   gl.useProgram(prog2);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  // 关键：显式绑定 FBO 纹理到纹理单元 0
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, tex);
   const res2 = gl.getUniformLocation(prog2, 'u_resolution');
