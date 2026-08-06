@@ -162,7 +162,7 @@ const VS_DOT=`attribute vec2 a_center;attribute float a_val;attribute vec2 a_qua
 const FS_DOT=`precision mediump float;uniform highp float u_radius;varying float v_alpha;varying highp vec2 v_center;varying highp vec2 v_fragPos;void main(){highp float dist=length(v_fragPos-v_center);highp float sigma=u_radius*0.45;highp float g=exp(-(dist*dist)/(2.0*sigma*sigma));if(g<0.001){gl_FragColor=vec4(0);return;}gl_FragColor=vec4(0,0,0,g*v_alpha);}`;
 const FS_BLUR=`precision mediump float;uniform sampler2D u_tex;uniform vec2 u_step;uniform vec2 u_res;void main(){vec2 uv=gl_FragCoord.xy/u_res;float w[5];w[0]=0.2270;w[1]=0.1945;w[2]=0.1216;w[3]=0.0540;w[4]=0.0162;vec4 c=texture2D(u_tex,uv)*w[0];for(int i=1;i<=4;i++){c+=texture2D(u_tex,uv+float(i)*u_step)*w[i];c+=texture2D(u_tex,uv-float(i)*u_step)*w[i];}gl_FragColor=c;}`;
 // 高斯版专用颜色映射：阈值更低（高斯模糊后 alpha 被稀释），并对 alpha 做放大
-const FS_COLOR_GAUSS=`precision mediump float;uniform vec2 u_res;uniform vec2 u_fbo_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_fbo_res;float a=texture2D(u_tex,uv).a;float boosted=clamp(pow(a,0.55)*2.2,0.0,1.0);if(boosted>0.002){gl_FragColor=vec4(cm(boosted),smoothstep(0.002,0.03,boosted));}else{gl_FragColor=vec4(0);}}` ;
+const FS_COLOR_GAUSS=`precision mediump float;uniform vec2 u_res;uniform vec2 u_fbo_res;uniform sampler2D u_tex;vec3 cm(float p){p=clamp(p,0.0,1.0);const vec3 c0=vec3(0.082,0.071,0.165),c1=vec3(0.243,0.0,0.973),c2=vec3(0.584,0.992,0.929),c3=vec3(0.604,1.0,0.243),c4=vec3(0.965,0.996,0.278),c5=vec3(0.847,0.141,0.141);if(p<0.40)return mix(c0,c1,p/0.40);if(p<0.55)return mix(c1,c2,(p-0.40)/0.15);if(p<0.70)return mix(c2,c3,(p-0.55)/0.15);if(p<0.85)return mix(c3,c4,(p-0.70)/0.15);return mix(c4,c5,(p-0.85)/0.15);}void main(){vec2 uv=gl_FragCoord.xy/u_fbo_res;float a=texture2D(u_tex,uv).a;float boosted=clamp(pow(a,0.4)*1.6,0.0,1.0);if(boosted>0.002){gl_FragColor=vec4(cm(boosted),smoothstep(0.002,0.025,boosted));}else{gl_FragColor=vec4(0);}}` ;
 
 function mkShader(gl:WebGLRenderingContext,type:number,src:string){const s=gl.createShader(type)!;gl.shaderSource(s,src);gl.compileShader(s);return s;}
 function mkProg(gl:WebGLRenderingContext,vs:string,fs:string){const p=gl.createProgram()!;gl.attachShader(p,mkShader(gl,gl.VERTEX_SHADER,vs));gl.attachShader(p,mkShader(gl,gl.FRAGMENT_SHADER,fs));gl.linkProgram(p);return p;}
@@ -250,7 +250,8 @@ function WebGLGaussPanel() {
       if (!glCtx) { console.error('[WebGLGauss] WebGL context failed - likely context limit exceeded'); return; }
       const gl = glCtx;
 
-      const DOT_RADIUS = 28, MAX = 12;
+      // DOT_RADIUS = 格距*1.5，保证相邻点光斑重叠融合
+      const DOT_RADIUS = Math.max(10, Math.round(W / 32 * 1.5)), MAX = 12;
       // WebGL1 FBO 需要 POT（2的幂次）纹理尺寸
       const nextPOT = (n: number) => { let p = 1; while (p < n) p <<= 1; return p; };
       const TW = nextPOT(W), TH = nextPOT(H);
@@ -313,11 +314,11 @@ function WebGLGaussPanel() {
       // ── Pass 1: 高斯光斑 → fbo1（用三角形 quad，避免 gl_PointSize 限制）──
       gl.useProgram(pDot);
       gl.bindFramebuffer(gl.FRAMEBUFFER, fbo1.fb);
-      gl.viewport(0, 0, W, H);
+      gl.viewport(0, 0, TW, TH); // 渲染到完整 FBO 空间
       gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
       gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
       gl.disable(gl.DEPTH_TEST);
-      gl.uniform2f(gl.getUniformLocation(pDot, 'u_res'), W, H);
+      gl.uniform2f(gl.getUniformLocation(pDot, 'u_res'), TW, TH); // NDC 转换基于 FBO 尺寸
       gl.uniform1f(gl.getUniformLocation(pDot, 'u_max'), MAX);
       gl.uniform1f(gl.getUniformLocation(pDot, 'u_radius'), DOT_RADIUS);
       // 每个点展开为 6 顶点（2个三角形）
@@ -353,10 +354,10 @@ function WebGLGaussPanel() {
       gl.enableVertexAttribArray(posLB);
 
       let srcFBO = fbo1, dstFBO = fbo2;
-      for (let pass = 0; pass < 3; pass++) {
+      for (let pass = 0; pass < 5; pass++) { // 5次迭代 = 更大的等效 σ
         // 水平模糊: srcFBO → dstFBO
         gl.bindFramebuffer(gl.FRAMEBUFFER, dstFBO.fb);
-        gl.viewport(0, 0, W, H);
+        gl.viewport(0, 0, TW, TH); // FBO 全尺寸渲染
         gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, srcFBO.tex);
@@ -368,7 +369,7 @@ function WebGLGaussPanel() {
 
         // 垂直模糊: srcFBO → dstFBO
         gl.bindFramebuffer(gl.FRAMEBUFFER, dstFBO.fb);
-        gl.viewport(0, 0, W, H);
+        gl.viewport(0, 0, TW, TH); // FBO 全尺寸渲染
         gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, srcFBO.tex);
