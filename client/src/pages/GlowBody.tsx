@@ -150,21 +150,9 @@ export default function GlowBody() {
           varying vec3 vNormal;
 
           void main() {
-            // 单面投影网格线 — 选法线最对齐的一个平面，干净不杂乱
-            vec3 absN = abs(vNormal);
+            // 固定 XY 平面投影 — 所有部位都是横竖直线
             float density = u_gridDensity * 0.5;
-
-            // 选择最合适的投影平面
-            vec2 coord;
-            if (absN.z >= absN.x && absN.z >= absN.y) {
-              coord = vWorldPos.xy; // 正面/背面 → 用 XY
-            } else if (absN.x >= absN.y) {
-              coord = vWorldPos.yz; // 侧面 → 用 YZ
-            } else {
-              coord = vWorldPos.xz; // 顶部/底部 → 用 XZ
-            }
-
-            vec2 grid = abs(fract(coord * density - 0.5) - 0.5);
+            vec2 grid = abs(fract(vWorldPos.xy * density - 0.5) - 0.5);
             float line = max(
               smoothstep(u_lineWidth, u_lineWidth * 0.2, grid.x),
               smoothstep(u_lineWidth, u_lineWidth * 0.2, grid.y)
