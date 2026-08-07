@@ -92,6 +92,9 @@ export default function GlowBody() {
         side: THREE.FrontSide,
         depthWrite: false,
         depthTest: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
         uniforms: {
           u_color: { value: new THREE.Color(COLOR_PRESETS[0].value) },
           u_gridDensity: { value: 35.0 },
