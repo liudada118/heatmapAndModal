@@ -140,34 +140,25 @@ export default function GlowBody() {
           varying vec3 vNormal;
 
           void main() {
-            // 三面投影网格线（Triplanar Grid）— 不依赖 UV，所有表面都有网格
-            vec3 absNormal = abs(vNormal);
-            float density = u_gridDensity * 0.5; // 世界坐标密度
+            // 单面投影网格线 — 选法线最对齐的一个平面，干净不杂乱
+            vec3 absN = abs(vNormal);
+            float density = u_gridDensity * 0.5;
 
-            // XY 平面投影（正面/背面）
-            vec2 gridXY = abs(fract(vWorldPos.xy * density - 0.5) - 0.5);
-            float lineXY = max(
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXY.x),
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXY.y)
+            // 选择最合适的投影平面
+            vec2 coord;
+            if (absN.z >= absN.x && absN.z >= absN.y) {
+              coord = vWorldPos.xy; // 正面/背面 → 用 XY
+            } else if (absN.x >= absN.y) {
+              coord = vWorldPos.yz; // 侧面 → 用 YZ
+            } else {
+              coord = vWorldPos.xz; // 顶部/底部 → 用 XZ
+            }
+
+            vec2 grid = abs(fract(coord * density - 0.5) - 0.5);
+            float line = max(
+              smoothstep(u_lineWidth, u_lineWidth * 0.2, grid.x),
+              smoothstep(u_lineWidth, u_lineWidth * 0.2, grid.y)
             );
-
-            // XZ 平面投影（顶部/底部）
-            vec2 gridXZ = abs(fract(vWorldPos.xz * density - 0.5) - 0.5);
-            float lineXZ = max(
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXZ.x),
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXZ.y)
-            );
-
-            // YZ 平面投影（侧面）
-            vec2 gridYZ = abs(fract(vWorldPos.yz * density - 0.5) - 0.5);
-            float lineYZ = max(
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridYZ.x),
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridYZ.y)
-            );
-
-            // 按法线方向混合三个投影（法线越朝向某轴，该轴的投影权重越大）
-            float line = lineXY * absNormal.z + lineXZ * absNormal.y + lineYZ * absNormal.x;
-            line = clamp(line, 0.0, 1.0);
 
             // 边缘发光（菲涅尔效果）
             vec3 viewDir = normalize(cameraPosition - vWorldPos);
