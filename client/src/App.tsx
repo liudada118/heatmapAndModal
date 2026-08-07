@@ -8,6 +8,7 @@ import Dashboard from "./pages/Dashboard";
 import Compare from "./pages/Compare";
 import GlowBody from "./pages/GlowBody";
 import SensorMapper from "./pages/SensorMapper";
+import RealisticRender from "./pages/RealisticRender";
 
 
 function Router() {
@@ -17,6 +18,7 @@ function Router() {
       <Route path={"/compare"} component={Compare} />
       <Route path={"/mapper"} component={SensorMapper} />
       <Route path={"/glow"} component={GlowBody} />
+      <Route path={"/realistic"} component={RealisticRender} />
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />

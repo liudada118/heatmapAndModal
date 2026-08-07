@@ -46,6 +46,15 @@ const TOOLS = [
     color: "from-yellow-500/20 to-amber-500/20",
     border: "border-yellow-500/30",
   },
+  {
+    title: "真实渲染",
+    desc: "800 传感器点位 3D 热力图：加载坐标数据映射到人体模型，实时模拟压力分布可视化",
+    icon: "🌡️",
+    path: "/realistic",
+    tags: ["800点", "热力图", "实时模拟", "区域筛选"],
+    color: "from-rose-500/20 to-red-500/20",
+    border: "border-rose-500/30",
+  },
 ];
 
 export default function Dashboard() {
