@@ -49,15 +49,15 @@ export default function GlowBody() {
     composer.addPass(new RenderPass(scene, camera));
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(W, H),
-      1.8,   // strength
-      0.6,   // radius
-      0.15   // threshold
+      0.6,   // strength — 大幅降低，只让最亮的核心发光
+      0.4,   // radius — 缩小辉光扩散范围
+      0.5    // threshold — 提高阈值，只有亮度>0.5的部分才 bloom
     );
     composer.addPass(bloomPass);
 
     // 金色发光材质
-    const GOLD = new THREE.Color(0xffaa00);
-    const GOLD_BRIGHT = new THREE.Color(0xffdd44);
+    const GOLD = new THREE.Color(0xcc8800);  // 降低亮度，避免被 bloom 淹没
+    const GOLD_BRIGHT = new THREE.Color(0xffdd44);  // 核心点保持高亮
 
     // 能量核心点（头部 + 胸部）
     const createEnergyCore = (pos: THREE.Vector3, intensity: number, size: number) => {
@@ -165,7 +165,7 @@ export default function GlowBody() {
           const lineMat = new THREE.LineBasicMaterial({
             color: GOLD,
             transparent: true,
-            opacity: 0.85,
+            opacity: 0.55,  // 降低透明度，让线条不会被 bloom 过度扩散
             linewidth: 1,
           });
 
@@ -187,13 +187,13 @@ export default function GlowBody() {
       // 能量核心：头部
       headCore = createEnergyCore(
         new THREE.Vector3(newCenter.x, newCenter.y + newSize.y * 0.42, newCenter.z + 0.1),
-        3, 0.12
+        2, 0.08  // 降低光源强度和球体大小
       );
 
       // 能量核心：胸部
       chestCore = createEnergyCore(
         new THREE.Vector3(newCenter.x, newCenter.y + newSize.y * 0.15, newCenter.z + 0.2),
-        4, 0.15
+        2.5, 0.10  // 降低光源强度和球体大小
       );
 
       camera.lookAt(newCenter);
@@ -210,13 +210,13 @@ export default function GlowBody() {
       // 能量核心脉冲
       if (headCore) {
         const pulse = 0.8 + Math.sin(t * 3) * 0.2;
-        headCore.light.intensity = 3 * pulse;
-        headCore.sprite.scale.setScalar(0.12 * 8 * pulse);
+        headCore.light.intensity = 2 * pulse;
+        headCore.sprite.scale.setScalar(0.08 * 6 * pulse);
       }
       if (chestCore) {
         const pulse = 0.8 + Math.sin(t * 2.5 + 1) * 0.2;
-        chestCore.light.intensity = 4 * pulse;
-        chestCore.sprite.scale.setScalar(0.15 * 8 * pulse);
+        chestCore.light.intensity = 2.5 * pulse;
+        chestCore.sprite.scale.setScalar(0.10 * 6 * pulse);
       }
 
       controls.update();
