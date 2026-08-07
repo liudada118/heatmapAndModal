@@ -141,19 +141,21 @@ export default function RealisticRender() {
       const center = box.getCenter(new THREE.Vector3());
       const scale = 8 / size.y;
       model.scale.setScalar(scale);
-      model.position.sub(center.multiplyScalar(scale));
+      const centerScaled = center.clone().multiplyScalar(scale);
+      model.position.sub(centerScaled);
       model.position.y += 4;
       model.updateMatrixWorld(true);
       modelGroupRef.current = model;
 
       // 传感器世界坐标
       const allSensors: { x: number; y: number; z: number; value: number }[] = [];
-      const sensorVec = new THREE.Vector3();
+      
       Object.values(data.regions).forEach((sensors) => {
         sensors.forEach((s) => {
-          sensorVec.set(s.position.x, s.position.y, s.position.z);
-          sensorVec.applyMatrix4(model.matrixWorld);
-          allSensors.push({ x: sensorVec.x, y: sensorVec.y, z: sensorVec.z, value: Math.random() });
+          const px = s.position.x * scale + model.position.x;
+          const py = s.position.y * scale + model.position.y;
+          const pz = s.position.z * scale + model.position.z;
+          allSensors.push({ x: px, y: py, z: pz, value: Math.random() });
         });
       });
       sensorsRef.current = allSensors;
