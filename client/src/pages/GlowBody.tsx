@@ -155,29 +155,85 @@ export default function GlowBody() {
 
       model.updateMatrixWorld(true);
 
-      // 遍历所有 mesh，替换为线框
+      // UV 网格线 ShaderMaterial — 规则正方形网格
+      const gridDensity = 28.0; // 网格密度（越大线越密）
+      const lineWidth = 0.04;   // 线条宽度（UV 空间，越小越细）
+
+      const gridShaderMat = new THREE.ShaderMaterial({
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          u_color: { value: new THREE.Color(0xcc8800) },
+          u_gridDensity: { value: gridDensity },
+          u_lineWidth: { value: lineWidth },
+          u_opacity: { value: 0.7 },
+          u_time: { value: 0.0 },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vWorldPos;
+          varying vec3 vNormal;
+          void main() {
+            vUv = uv;
+            vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 u_color;
+          uniform float u_gridDensity;
+          uniform float u_lineWidth;
+          uniform float u_opacity;
+          uniform float u_time;
+          varying vec2 vUv;
+          varying vec3 vWorldPos;
+          varying vec3 vNormal;
+
+          void main() {
+            // UV 网格线
+            vec2 grid = abs(fract(vUv * u_gridDensity - 0.5) - 0.5);
+            float lineX = smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.x);
+            float lineY = smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.y);
+            float line = max(lineX, lineY);
+
+            // 边缘发光（菲涅尔效果）
+            vec3 viewDir = normalize(cameraPosition - vWorldPos);
+            float fresnel = 1.0 - abs(dot(viewDir, vNormal));
+            fresnel = pow(fresnel, 2.0) * 0.4;
+
+            // 线条亮度 + 边缘辉光
+            float brightness = line * 0.85 + fresnel;
+
+            // 微弱脉冲
+            float pulse = 0.9 + sin(u_time * 1.5 + vWorldPos.y * 0.5) * 0.1;
+
+            float alpha = brightness * u_opacity * pulse;
+            if (alpha < 0.01) discard;
+
+            gl_FragColor = vec4(u_color * (1.0 + fresnel * 0.5), alpha);
+          }
+        `,
+      });
+
+      // 遍历所有 mesh，替换材质为网格线 shader
+      const gridMaterials: THREE.ShaderMaterial[] = [];
       model.traverse((child: any) => {
         if (child.isMesh) {
-          // 创建线框几何体
-          const wireGeo = new THREE.WireframeGeometry(child.geometry);
-
-          // 金色发光线条
-          const lineMat = new THREE.LineBasicMaterial({
-            color: GOLD,
-            transparent: true,
-            opacity: 0.55,  // 降低透明度，让线条不会被 bloom 过度扩散
-            linewidth: 1,
-          });
-
-          const wireframe = new THREE.LineSegments(wireGeo, lineMat);
-          wireframe.position.copy(child.position);
-          wireframe.rotation.copy(child.rotation);
-          wireframe.scale.copy(child.scale);
-          wireframe.applyMatrix4(child.matrixWorld);
-
-          scene.add(wireframe);
+          const mat = gridShaderMat.clone();
+          gridMaterials.push(mat);
+          child.material = mat;
+          child.material.needsUpdate = true;
         }
       });
+
+      // 把模型加入场景（现在用 shader 材质渲染，不再是线框）
+      scene.add(model);
+
+      // 保存引用，用于动画更新 u_time
+      (scene as any).__gridMaterials = gridMaterials;
 
       // 计算模型变换后的包围盒
       const newBox = new THREE.Box3().setFromObject(model);
@@ -208,6 +264,14 @@ export default function GlowBody() {
       const t = clock.getElapsedTime();
 
       // 能量核心脉冲
+      // 更新网格线 shader 的时间
+      const mats = (scene as any).__gridMaterials as THREE.ShaderMaterial[] | undefined;
+      if (mats) {
+        for (const m of mats) {
+          m.uniforms.u_time.value = t;
+        }
+      }
+
       if (headCore) {
         const pulse = 0.8 + Math.sin(t * 3) * 0.2;
         headCore.light.intensity = 2 * pulse;
