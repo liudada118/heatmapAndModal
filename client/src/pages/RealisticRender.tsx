@@ -62,7 +62,7 @@ function computeVertexHeat(
     valueSum += w * s.value;
   }
 
-  if (weightSum === 0) return 0;
+  if (weightSum === 0) return -1;
   return valueSum / weightSum;
 }
 
@@ -71,8 +71,8 @@ export default function RealisticRender() {
   const [, navigate] = useLocation();
   const [loading, setLoading] = useState(true);
   const [sensorCount, setSensorCount] = useState(0);
-  const [radius, setRadius] = useState(0.8);
-  const [power, setPower] = useState(2.0);
+  const [radius, setRadius] = useState(2.0);
+  const [power, setPower] = useState(2.5);
   const meshesRef = useRef<THREE.Mesh[]>([]);
   const sensorsRef = useRef<{ x: number; y: number; z: number; value: number }[]>([]);
   const animFrameRef = useRef(0);
@@ -107,7 +107,9 @@ export default function RealisticRender() {
         v.applyMatrix4(worldMatrix);
 
         const heat = computeVertexHeat(v.x, v.y, v.z, sensors, pow, rad);
-        const [r, g, b] = heatColorRGB(heat);
+        const heatVal = heat;
+        if (heatVal < 0) { colors.setXYZ(i, 0.12, 0.12, 0.15); continue; }
+        const [r, g, b] = heatColorRGB(heatVal);
         colors.setXYZ(i, r, g, b);
       }
 
@@ -173,12 +175,14 @@ export default function RealisticRender() {
 
       // 提取所有传感器世界坐标（应用模型同样的变换）
       const allSensors: { x: number; y: number; z: number; value: number }[] = [];
+      // 传感器坐标是模型的局部坐标（normalized-world），需要经过模型的 matrixWorld 变换
+      const sensorVec = new THREE.Vector3();
       Object.values(data.regions).forEach((sensors) => {
         sensors.forEach((s) => {
-          const px = s.position.x * scale + model.position.x;
-          const py = s.position.y * scale + model.position.y;
-          const pz = s.position.z * scale + model.position.z;
-          allSensors.push({ x: px, y: py, z: pz, value: Math.random() });
+          // 传感器坐标是原始模型空间的坐标，需要经过 model 的 scale + position 变换
+          sensorVec.set(s.position.x, s.position.y, s.position.z);
+          sensorVec.applyMatrix4(model.matrixWorld);
+          allSensors.push({ x: sensorVec.x, y: sensorVec.y, z: sensorVec.z, value: Math.random() });
         });
       });
       sensorsRef.current = allSensors;
@@ -211,7 +215,7 @@ export default function RealisticRender() {
       scene.add(model);
 
       // 初始计算顶点颜色
-      recomputeColors(0.8, 2.0);
+      recomputeColors(2.0, 2.5);
 
       const newBox = new THREE.Box3().setFromObject(model);
       const newCenter = newBox.getCenter(new THREE.Vector3());
@@ -288,7 +292,7 @@ export default function RealisticRender() {
           <div>
             <label className="text-white/50 text-xs block mb-1">影响半径: {radius.toFixed(2)}</label>
             <input
-              type="range" min="20" max="200" step="5"
+              type="range" min="50" max="500" step="5"
               value={Math.round(radius * 100)}
               onChange={(e) => {
                 const v = Number(e.target.value) / 100;
