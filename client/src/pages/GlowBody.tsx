@@ -150,9 +150,16 @@ export default function GlowBody() {
           varying vec3 vNormal;
 
           void main() {
-            // 固定 XY 平面投影 — 所有部位都是横竖直线
-            float density = u_gridDensity * 0.5;
-            vec2 grid = abs(fract(vWorldPos.xy * density - 0.5) - 0.5);
+            // 混合方案：有 UV 用 UV（贴合表面直线），没 UV 用世界坐标 fallback
+            float density = u_gridDensity;
+            vec2 coord;
+            // 检测 UV 是否有效（无效 UV 通常是 0,0）
+            if (vUv.x > 0.001 || vUv.y > 0.001) {
+              coord = vUv * density;  // UV 坐标：贴合表面的直线网格
+            } else {
+              coord = vWorldPos.xy * density * 0.5;  // Fallback：世界坐标投影
+            }
+            vec2 grid = abs(fract(coord - 0.5) - 0.5);
             float line = max(
               smoothstep(u_lineWidth, 0.0, grid.x),
               smoothstep(u_lineWidth, 0.0, grid.y)
