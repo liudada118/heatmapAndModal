@@ -43,14 +43,16 @@ export default function GlowBody() {
     const H = container.clientHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x080808);
+    scene.background = new THREE.Color(0x000000);  // 纯黑
 
     const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 100);
     camera.position.set(0, 4, 10);
 
+    // 最简单的渲染器设置 — 无 toneMapping，无额外处理
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(W, H);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.NoToneMapping;  // 关闭色调映射
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -60,8 +62,7 @@ export default function GlowBody() {
     controls.autoRotate = true;
     controls.autoRotateSpeed = 1.5;
 
-    // 无 Bloom，无后处理，直接渲染
-    scene.add(new THREE.AmbientLight(0x111111, 0.1));
+    // 无灯光，无后处理，shader 自己输出颜色
 
     const loader = new GLTFLoader();
 
@@ -78,14 +79,14 @@ export default function GlowBody() {
 
       model.updateMatrixWorld(true);
 
-      // 黑色底层（遮挡背面）
+      // 黑色底层（遮挡背面）— 和背景完全一样的纯黑
       const blackBaseMat = new THREE.MeshBasicMaterial({
-        color: 0x080808,
+        color: 0x000000,
         side: THREE.FrontSide,
         depthWrite: true,
       });
 
-      // 网格线 Shader — 不透明，不发光，线条粗
+      // 网格线 Shader — 纯色，不透明，不发光
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
         side: THREE.FrontSide,
@@ -95,7 +96,6 @@ export default function GlowBody() {
           u_color: { value: new THREE.Color(COLOR_PRESETS[0].value) },
           u_gridDensity: { value: 35.0 },
           u_lineWidth: { value: 0.025 },
-          u_opacity: { value: 1.0 },
         },
         vertexShader: `
           varying vec2 vUv;
@@ -108,20 +108,19 @@ export default function GlowBody() {
           uniform vec3 u_color;
           uniform float u_gridDensity;
           uniform float u_lineWidth;
-          uniform float u_opacity;
           varying vec2 vUv;
 
           void main() {
             vec2 grid = abs(fract(vUv * u_gridDensity - 0.5) - 0.5);
-            float line = max(
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.x),
-              smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.y)
-            );
-            // line = 1 在线条上，0 在空白处
-            float alpha = (1.0 - line) * u_opacity;
-            if (alpha < 0.01) discard;
+            // 线条：grid < lineWidth 的地方画线
+            float lineX = step(grid.x, u_lineWidth);
+            float lineY = step(grid.y, u_lineWidth);
+            float line = max(lineX, lineY);
 
-            gl_FragColor = vec4(u_color, alpha);
+            if (line < 0.5) discard;  // 不在线条上的像素直接丢弃
+
+            // 线条颜色，完全不透明
+            gl_FragColor = vec4(u_color, 1.0);
           }
         `,
       });
@@ -187,19 +186,19 @@ export default function GlowBody() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#080808] flex flex-col">
+    <div className="min-h-screen bg-black flex flex-col">
       {/* Header */}
-      <div className="px-6 py-3 flex items-center gap-4 bg-black/50 border-b border-white/5 shrink-0">
+      <div className="px-6 py-3 flex items-center gap-4 bg-black border-b border-white/10 shrink-0">
         <button onClick={() => navigate('/')} className="text-white/50 hover:text-white text-sm">
           &larr; 返回
         </button>
         <h1 className="text-white font-bold text-lg tracking-wider">能量人体模型</h1>
-        <span className="text-white/30 text-xs">Grid Shader · No Bloom</span>
+        <span className="text-white/30 text-xs">Grid Shader · No Glow</span>
       </div>
       {/* 3D Viewport */}
       <div ref={containerRef} className="flex-1 relative">
         {/* 控制面板 */}
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-sm rounded-lg px-5 py-3 flex items-center gap-6 border border-white/10">
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/90 rounded-lg px-5 py-3 flex items-center gap-6 border border-white/10">
           {/* 颜色切换 */}
           <div className="flex items-center gap-1.5">
             {COLOR_PRESETS.map((c, i) => (
