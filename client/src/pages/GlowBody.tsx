@@ -22,7 +22,7 @@ export default function GlowBody() {
 
     // Scene
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1200);
+    scene.background = new THREE.Color(0x0a0a08);
 
     // Camera
     const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 100);
@@ -55,67 +55,16 @@ export default function GlowBody() {
     );
     composer.addPass(bloomPass);
 
-    // 金色发光材质
-    const GOLD = new THREE.Color(0xcc8800);  // 降低亮度，避免被 bloom 淹没
-    const GOLD_BRIGHT = new THREE.Color(0xffdd44);  // 核心点保持高亮
-
-    // 能量核心点（头部 + 胸部）
-    const createEnergyCore = (pos: THREE.Vector3, intensity: number, size: number) => {
-      // 发光球体
-      const geo = new THREE.SphereGeometry(size, 16, 16);
-      const mat = new THREE.MeshBasicMaterial({ color: 0xffffcc, transparent: true, opacity: 0.95 });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.copy(pos);
-      scene.add(mesh);
-
-      // 点光源
-      const light = new THREE.PointLight(0xffaa00, intensity, 8);
-      light.position.copy(pos);
-      scene.add(light);
-
-      // 光晕精灵
-      const spriteMat = new THREE.SpriteMaterial({
-        map: createGlowTexture(),
-        color: 0xffcc44,
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        opacity: 0.7,
-      });
-      const sprite = new THREE.Sprite(spriteMat);
-      sprite.position.copy(pos);
-      sprite.scale.set(size * 8, size * 8, 1);
-      scene.add(sprite);
-
-      return { mesh, light, sprite };
-    };
-
-    // 生成光晕纹理
-    function createGlowTexture() {
-      const canvas = document.createElement('canvas');
-      canvas.width = 128;
-      canvas.height = 128;
-      const ctx = canvas.getContext('2d')!;
-      const gradient = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-      gradient.addColorStop(0, 'rgba(255, 220, 100, 1)');
-      gradient.addColorStop(0.3, 'rgba(255, 180, 50, 0.6)');
-      gradient.addColorStop(0.7, 'rgba(255, 150, 0, 0.15)');
-      gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, 128, 128);
-      const tex = new THREE.CanvasTexture(canvas);
-      return tex;
-    }
-
-    // 环境光（微弱）
-    scene.add(new THREE.AmbientLight(0x332200, 0.3));
+    // 环境光
+    scene.add(new THREE.AmbientLight(0x222222, 0.2));
 
     // 背景渐变球
     const bgGeo = new THREE.SphereGeometry(40, 32, 32);
     const bgMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       uniforms: {
-        color1: { value: new THREE.Color(0x1a1200) },
-        color2: { value: new THREE.Color(0x332800) },
+        color1: { value: new THREE.Color(0x0a0a08) },
+        color2: { value: new THREE.Color(0x1a1508) },
       },
       vertexShader: `
         varying vec3 vWorldPos;
@@ -138,8 +87,6 @@ export default function GlowBody() {
 
     // 加载模型
     const loader = new GLTFLoader();
-    let headCore: any = null;
-    let chestCore: any = null;
 
     loader.load(MODEL_URL, (gltf) => {
       const model = gltf.scene;
@@ -156,8 +103,8 @@ export default function GlowBody() {
       model.updateMatrixWorld(true);
 
       // UV 网格线 ShaderMaterial — 规则正方形网格
-      const gridDensity = 60.0; // 网格密度（越大线越密）
-      const lineWidth = 0.025;  // 线条宽度（UV 空间，越小越细）
+      const gridDensity = 80.0; // 网格密度（越大线越密）
+      const lineWidth = 0.02;   // 线条宽度
 
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
@@ -165,7 +112,7 @@ export default function GlowBody() {
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         uniforms: {
-          u_color: { value: new THREE.Color(0xcc8800) },
+          u_color: { value: new THREE.Color(0xddaa33) },  // 干净的暖金色，不油腻
           u_gridDensity: { value: gridDensity },
           u_lineWidth: { value: lineWidth },
           u_opacity: { value: 0.7 },
@@ -238,19 +185,6 @@ export default function GlowBody() {
       // 计算模型变换后的包围盒
       const newBox = new THREE.Box3().setFromObject(model);
       const newCenter = newBox.getCenter(new THREE.Vector3());
-      const newSize = newBox.getSize(new THREE.Vector3());
-
-      // 能量核心：头部
-      headCore = createEnergyCore(
-        new THREE.Vector3(newCenter.x, newCenter.y + newSize.y * 0.42, newCenter.z + 0.1),
-        2, 0.08  // 降低光源强度和球体大小
-      );
-
-      // 能量核心：胸部
-      chestCore = createEnergyCore(
-        new THREE.Vector3(newCenter.x, newCenter.y + newSize.y * 0.15, newCenter.z + 0.2),
-        2.5, 0.10  // 降低光源强度和球体大小
-      );
 
       camera.lookAt(newCenter);
       controls.target.copy(newCenter);
@@ -263,24 +197,12 @@ export default function GlowBody() {
       frameId = requestAnimationFrame(animate);
       const t = clock.getElapsedTime();
 
-      // 能量核心脉冲
       // 更新网格线 shader 的时间
       const mats = (scene as any).__gridMaterials as THREE.ShaderMaterial[] | undefined;
       if (mats) {
         for (const m of mats) {
           m.uniforms.u_time.value = t;
         }
-      }
-
-      if (headCore) {
-        const pulse = 0.8 + Math.sin(t * 3) * 0.2;
-        headCore.light.intensity = 2 * pulse;
-        headCore.sprite.scale.setScalar(0.08 * 6 * pulse);
-      }
-      if (chestCore) {
-        const pulse = 0.8 + Math.sin(t * 2.5 + 1) * 0.2;
-        chestCore.light.intensity = 2.5 * pulse;
-        chestCore.sprite.scale.setScalar(0.10 * 6 * pulse);
       }
 
       controls.update();
