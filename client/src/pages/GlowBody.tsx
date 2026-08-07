@@ -112,20 +112,27 @@ export default function GlowBody() {
 
       model.updateMatrixWorld(true);
 
-      // UV 网格线 ShaderMaterial — 规则正方形网格
-      const gridDensity = 40.0; // 网格密度
-      const lineWidth = 0.012;  // 线条宽度（细线）
+      // ===== 第一层：纯黑色不透明底层（遮挡背面网格线） =====
+      const blackBaseMat = new THREE.MeshBasicMaterial({
+        color: 0x0a0a08,  // 和背景色一致
+        side: THREE.FrontSide,
+        depthWrite: true,
+      });
+
+      // ===== 第二层：UV 网格线 ShaderMaterial =====
+      const gridDensity = 40.0;
+      const lineWidthVal = 0.012;
 
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
-        side: THREE.DoubleSide,
-        depthWrite: true,
+        side: THREE.FrontSide,
+        depthWrite: false,  // 网格线层不写深度，让底层黑色做遮挡
         depthTest: true,
         uniforms: {
-          u_color: { value: new THREE.Color(0xddaa33) },  // 干净的暖金色，不油腻
+          u_color: { value: new THREE.Color(0xddaa33) },
           u_gridDensity: { value: gridDensity },
-          u_lineWidth: { value: lineWidth },
-          u_opacity: { value: 0.7 },
+          u_lineWidth: { value: lineWidthVal },
+          u_opacity: { value: 0.85 },
           u_time: { value: 0.0 },
         },
         vertexShader: `
@@ -157,7 +164,6 @@ export default function GlowBody() {
               smoothstep(u_lineWidth, 0.0, grid.y)
             );
 
-            // 干净锐利的线条，无菲涅尔，无脉冲
             float alpha = line * u_opacity;
             if (alpha < 0.01) discard;
 
@@ -166,7 +172,7 @@ export default function GlowBody() {
         `,
       });
 
-      // 遍历所有 mesh，替换材质为网格线 shader
+      // 遍历所有 mesh
       const gridMaterials: THREE.ShaderMaterial[] = [];
       model.traverse((child: any) => {
         if (child.isMesh) {
@@ -177,17 +183,27 @@ export default function GlowBody() {
             child.visible = false;
             return;
           }
+
+          // 黑色底层 mesh（和原 mesh 完全相同位置，用于遮挡背面）
+          const baseMesh = new THREE.Mesh(geo, blackBaseMat);
+          baseMesh.matrixAutoUpdate = false;
+          baseMesh.matrix.copy(child.matrixWorld);
+          baseMesh.renderOrder = 0;
+          scene.add(baseMesh);
+
+          // 网格线层（renderOrder 更高，画在黑色层上面）
           const mat = gridShaderMat.clone();
           gridMaterials.push(mat);
           child.material = mat;
           child.material.needsUpdate = true;
+          child.renderOrder = 1;
         }
       });
 
-      // 把模型加入场景（现在用 shader 材质渲染，不再是线框）
+      // 把模型加入场景
       scene.add(model);
 
-      // 保存引用，用于动画更新 u_time
+      // 保存引用
       (scene as any).__gridMaterials = gridMaterials;
       materialsRef.current = gridMaterials;
 
@@ -206,7 +222,6 @@ export default function GlowBody() {
       frameId = requestAnimationFrame(animate);
       const t = clock.getElapsedTime();
 
-      // 更新网格线 shader 的时间
       const mats = (scene as any).__gridMaterials as THREE.ShaderMaterial[] | undefined;
       if (mats) {
         for (const m of mats) {
@@ -239,7 +254,7 @@ export default function GlowBody() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#1a1200] flex flex-col">
+    <div className="min-h-screen bg-[#0a0a08] flex flex-col">
       {/* Header */}
       <div className="px-6 py-3 flex items-center gap-4 bg-black/30 border-b border-yellow-900/30 shrink-0">
         <button onClick={() => navigate('/')} className="text-yellow-500/60 hover:text-yellow-400 text-sm">
