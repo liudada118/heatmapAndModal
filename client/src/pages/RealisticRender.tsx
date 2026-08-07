@@ -136,26 +136,31 @@ export default function RealisticRender() {
     const loadSensors = fetch(SENSOR_URL).then(r => r.json()) as Promise<SensorData>;
 
     Promise.all([loadModel, loadSensors]).then(([model, data]) => {
-      const box = new THREE.Box3().setFromObject(model);
-      const size = box.getSize(new THREE.Vector3());
-      const center = box.getCenter(new THREE.Vector3());
-      const scale = 8 / size.y;
-      model.scale.setScalar(scale);
-      const centerScaled = center.clone().multiplyScalar(scale);
-      model.position.sub(centerScaled);
-      model.position.y += 4;
-      model.updateMatrixWorld(true);
-      modelGroupRef.current = model;
+      // 使用和 SensorMapper 完全相同的变换方式
+      const originalBox = new THREE.Box3().setFromObject(model);
+      const originalSize = originalBox.getSize(new THREE.Vector3());
+      const maxDimension = Math.max(originalSize.x, originalSize.y, originalSize.z);
+      const center = originalBox.getCenter(new THREE.Vector3());
+      const scale = 8 / maxDimension;
 
-      // 传感器世界坐标
+      const normalizedModel = new THREE.Group();
+      normalizedModel.add(model);
+      normalizedModel.scale.setScalar(scale);
+      normalizedModel.position.set(
+        -center.x * scale,
+        -center.y * scale + originalSize.y * scale * 0.5,
+        -center.z * scale,
+      );
+      normalizedModel.updateMatrixWorld(true);
+      scene.add(normalizedModel);
+      modelGroupRef.current = normalizedModel;
+
+      // 传感器坐标是 normalized-world 空间（SensorMapper 导出时的坐标系）
       const allSensors: { x: number; y: number; z: number; value: number }[] = [];
-      
       Object.values(data.regions).forEach((sensors) => {
         sensors.forEach((s) => {
-          const px = s.position.x * scale + model.position.x;
-          const py = s.position.y * scale + model.position.y;
-          const pz = s.position.z * scale + model.position.z;
-          allSensors.push({ x: px, y: py, z: pz, value: Math.random() });
+          // 坐标直接使用，因为 normalized-world 就是变换后的世界坐标
+          allSensors.push({ x: s.position.x, y: s.position.y, z: s.position.z, value: Math.random() });
         });
       });
       sensorsRef.current = allSensors;
@@ -163,7 +168,7 @@ export default function RealisticRender() {
 
       // 模型材质 — 顶点颜色
       const validMeshes: THREE.Mesh[] = [];
-      model.traverse((child: any) => {
+      normalizedModel.traverse((child: any) => {
         if (child.isMesh) {
           const geo = child.geometry as THREE.BufferGeometry;
           const vertCount = geo.attributes.position ? geo.attributes.position.count : 0;
@@ -176,7 +181,6 @@ export default function RealisticRender() {
         }
       });
       meshesRef.current = validMeshes;
-      scene.add(model);
 
       // 点云 InstancedMesh
       const pointGeo = new THREE.SphereGeometry(0.08, 8, 6);
@@ -201,7 +205,7 @@ export default function RealisticRender() {
       // 初始计算热力图
       recomputeColors(2.0, 2.5);
 
-      const newBox = new THREE.Box3().setFromObject(model);
+      const newBox = new THREE.Box3().setFromObject(normalizedModel);
       const newCenter = newBox.getCenter(new THREE.Vector3());
       camera.lookAt(newCenter);
       controls.target.copy(newCenter);
