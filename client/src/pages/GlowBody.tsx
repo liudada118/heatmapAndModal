@@ -118,9 +118,9 @@ export default function GlowBody() {
 
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
+        side: THREE.FrontSide,
+        depthWrite: true,
+        depthTest: true,
         uniforms: {
           u_color: { value: new THREE.Color(0xddaa33) },  // 干净的暖金色，不油腻
           u_gridDensity: { value: gridDensity },
