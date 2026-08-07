@@ -156,8 +156,8 @@ export default function GlowBody() {
       model.updateMatrixWorld(true);
 
       // UV 网格线 ShaderMaterial — 规则正方形网格
-      const gridDensity = 28.0; // 网格密度（越大线越密）
-      const lineWidth = 0.04;   // 线条宽度（UV 空间，越小越细）
+      const gridDensity = 60.0; // 网格密度（越大线越密）
+      const lineWidth = 0.025;  // 线条宽度（UV 空间，越小越细）
 
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
