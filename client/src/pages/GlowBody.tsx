@@ -2,9 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { useLocation } from 'wouter';
 
 const MODEL_URL = '/manus-storage/human3_4d7d4b1f.glb';
@@ -20,8 +17,8 @@ export default function GlowBody() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [, navigate] = useLocation();
   const materialsRef = useRef<THREE.ShaderMaterial[]>([]);
-  const [density, setDensity] = useState(40);
-  const [lineWidth, setLineWidth] = useState(0.012);
+  const [density, setDensity] = useState(35);
+  const [lineWidth, setLineWidth] = useState(0.025);
   const [colorIdx, setColorIdx] = useState(0);
 
   const updateShader = useCallback((d: number, lw: number) => {
@@ -46,7 +43,7 @@ export default function GlowBody() {
     const H = container.clientHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a0a08);
+    scene.background = new THREE.Color(0x080808);
 
     const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 100);
     camera.position.set(0, 4, 10);
@@ -54,8 +51,6 @@ export default function GlowBody() {
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(W, H);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.2;
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -65,44 +60,8 @@ export default function GlowBody() {
     controls.autoRotate = true;
     controls.autoRotateSpeed = 1.5;
 
-    const composer = new EffectComposer(renderer);
-    composer.addPass(new RenderPass(scene, camera));
-    const bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(W, H),
-      0.2,   // strength
-      0.3,   // radius
-      0.75   // threshold
-    );
-    composer.addPass(bloomPass);
-
-    scene.add(new THREE.AmbientLight(0x222222, 0.2));
-
-    // 背景渐变球
-    const bgGeo = new THREE.SphereGeometry(40, 32, 32);
-    const bgMat = new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      uniforms: {
-        color1: { value: new THREE.Color(0x0a0a08) },
-        color2: { value: new THREE.Color(0x0a1015) },
-      },
-      vertexShader: `
-        varying vec3 vWorldPos;
-        void main() {
-          vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 color1;
-        uniform vec3 color2;
-        varying vec3 vWorldPos;
-        void main() {
-          float t = smoothstep(-20.0, 20.0, vWorldPos.y);
-          gl_FragColor = vec4(mix(color1, color2, t), 1.0);
-        }
-      `,
-    });
-    scene.add(new THREE.Mesh(bgGeo, bgMat));
+    // 无 Bloom，无后处理，直接渲染
+    scene.add(new THREE.AmbientLight(0x111111, 0.1));
 
     const loader = new GLTFLoader();
 
@@ -121,12 +80,12 @@ export default function GlowBody() {
 
       // 黑色底层（遮挡背面）
       const blackBaseMat = new THREE.MeshBasicMaterial({
-        color: 0x0a0a08,
+        color: 0x080808,
         side: THREE.FrontSide,
         depthWrite: true,
       });
 
-      // 网格线 Shader
+      // 网格线 Shader — 不透明，不发光，线条粗
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
         side: THREE.FrontSide,
@@ -134,17 +93,14 @@ export default function GlowBody() {
         depthTest: true,
         uniforms: {
           u_color: { value: new THREE.Color(COLOR_PRESETS[0].value) },
-          u_gridDensity: { value: 40.0 },
-          u_lineWidth: { value: 0.012 },
-          u_opacity: { value: 0.9 },
-          u_time: { value: 0.0 },
+          u_gridDensity: { value: 35.0 },
+          u_lineWidth: { value: 0.025 },
+          u_opacity: { value: 1.0 },
         },
         vertexShader: `
           varying vec2 vUv;
-          varying vec3 vNormal;
           void main() {
             vUv = uv;
-            vNormal = normalize(normalMatrix * normal);
             gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           }
         `,
@@ -153,18 +109,16 @@ export default function GlowBody() {
           uniform float u_gridDensity;
           uniform float u_lineWidth;
           uniform float u_opacity;
-          uniform float u_time;
           varying vec2 vUv;
-          varying vec3 vNormal;
 
           void main() {
             vec2 grid = abs(fract(vUv * u_gridDensity - 0.5) - 0.5);
             float line = max(
-              smoothstep(u_lineWidth, 0.0, grid.x),
-              smoothstep(u_lineWidth, 0.0, grid.y)
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.x),
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.y)
             );
-
-            float alpha = line * u_opacity;
+            // line = 1 在线条上，0 在空白处
+            float alpha = (1.0 - line) * u_opacity;
             if (alpha < 0.01) discard;
 
             gl_FragColor = vec4(u_color, alpha);
@@ -199,8 +153,6 @@ export default function GlowBody() {
       });
 
       scene.add(model);
-
-      (scene as any).__gridMaterials = gridMaterials;
       materialsRef.current = gridMaterials;
 
       const newBox = new THREE.Box3().setFromObject(model);
@@ -210,18 +162,10 @@ export default function GlowBody() {
     });
 
     let frameId = 0;
-    const clock = new THREE.Clock();
     const animate = () => {
       frameId = requestAnimationFrame(animate);
-      const t = clock.getElapsedTime();
-      const mats = (scene as any).__gridMaterials as THREE.ShaderMaterial[] | undefined;
-      if (mats) {
-        for (const m of mats) {
-          m.uniforms.u_time.value = t;
-        }
-      }
       controls.update();
-      composer.render();
+      renderer.render(scene, camera);
     };
     animate();
 
@@ -231,7 +175,6 @@ export default function GlowBody() {
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
-      composer.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
 
@@ -244,14 +187,14 @@ export default function GlowBody() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#0a0a08] flex flex-col">
+    <div className="min-h-screen bg-[#080808] flex flex-col">
       {/* Header */}
-      <div className="px-6 py-3 flex items-center gap-4 bg-black/30 border-b border-cyan-900/30 shrink-0">
-        <button onClick={() => navigate('/')} className="text-cyan-500/60 hover:text-cyan-400 text-sm">
+      <div className="px-6 py-3 flex items-center gap-4 bg-black/50 border-b border-white/5 shrink-0">
+        <button onClick={() => navigate('/')} className="text-white/50 hover:text-white text-sm">
           &larr; 返回
         </button>
-        <h1 className="text-cyan-400 font-bold text-lg tracking-wider">能量人体模型</h1>
-        <span className="text-cyan-600/50 text-xs">Grid Shader + Bloom</span>
+        <h1 className="text-white font-bold text-lg tracking-wider">能量人体模型</h1>
+        <span className="text-white/30 text-xs">Grid Shader · No Bloom</span>
       </div>
       {/* 3D Viewport */}
       <div ref={containerRef} className="flex-1 relative">
@@ -272,18 +215,18 @@ export default function GlowBody() {
           <label className="flex items-center gap-2 text-white/70 text-xs">
             <span>密度</span>
             <input
-              type="range" min="20" max="150" step="5" value={density}
+              type="range" min="15" max="100" step="5" value={density}
               onChange={(e) => { const v = Number(e.target.value); setDensity(v); updateShader(v, lineWidth); }}
-              className="w-24 accent-cyan-500"
+              className="w-24 accent-cyan-400"
             />
             <span className="w-6 text-center">{density}</span>
           </label>
           <label className="flex items-center gap-2 text-white/70 text-xs">
             <span>线宽</span>
             <input
-              type="range" min="5" max="60" step="1" value={Math.round(lineWidth * 1000)}
+              type="range" min="10" max="80" step="1" value={Math.round(lineWidth * 1000)}
               onChange={(e) => { const v = Number(e.target.value) / 1000; setLineWidth(v); updateShader(density, v); }}
-              className="w-24 accent-cyan-500"
+              className="w-24 accent-cyan-400"
             />
             <span className="w-8 text-center">{(lineWidth * 1000).toFixed(0)}</span>
           </label>
