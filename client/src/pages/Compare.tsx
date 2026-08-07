@@ -675,7 +675,7 @@ function HumanTexturePanel() {
 
     import('three/examples/jsm/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
       const loader = new GLTFLoader();
-      loader.load('/manus-storage/human3_667b8ceb.glb', (gltf) => {
+      loader.load('/manus-storage/human3_4d7d4b1f.glb', (gltf) => {
         const mdl = gltf.scene;
         const box = new THREE.Box3().setFromObject(mdl);
         const size = box.getSize(new THREE.Vector3());

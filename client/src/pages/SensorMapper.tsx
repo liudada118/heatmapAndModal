@@ -1551,7 +1551,7 @@ export default function SensorMapper() {
               <div className="text-sm mb-3">拖拽 .glb 文件到此处</div>
               <div className="text-xs mb-3">或选择预加载模型：</div>
               <div className="flex gap-2 justify-center">
-                <button onClick={() => loadFromURL('/manus-storage/human3_667b8ceb.glb', 'human3.glb')}
+                <button onClick={() => loadFromURL('/manus-storage/human3_4d7d4b1f.glb', 'human3.glb')}
                   className="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs pointer-events-auto">
                   🧍 人体模型
                 </button>

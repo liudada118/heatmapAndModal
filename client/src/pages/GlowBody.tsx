@@ -7,7 +7,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { useLocation } from 'wouter';
 
-const MODEL_URL = '/manus-storage/human3_glb_2f8a1b3c.glb';
+const MODEL_URL = '/manus-storage/human3_4d7d4b1f.glb';
 
 export default function GlowBody() {
   const containerRef = useRef<HTMLDivElement>(null);
