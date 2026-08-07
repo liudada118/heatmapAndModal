@@ -140,11 +140,34 @@ export default function GlowBody() {
           varying vec3 vNormal;
 
           void main() {
-            // UV 网格线
-            vec2 grid = abs(fract(vUv * u_gridDensity - 0.5) - 0.5);
-            float lineX = smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.x);
-            float lineY = smoothstep(u_lineWidth, u_lineWidth * 0.3, grid.y);
-            float line = max(lineX, lineY);
+            // 三面投影网格线（Triplanar Grid）— 不依赖 UV，所有表面都有网格
+            vec3 absNormal = abs(vNormal);
+            float density = u_gridDensity * 0.5; // 世界坐标密度
+
+            // XY 平面投影（正面/背面）
+            vec2 gridXY = abs(fract(vWorldPos.xy * density - 0.5) - 0.5);
+            float lineXY = max(
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXY.x),
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXY.y)
+            );
+
+            // XZ 平面投影（顶部/底部）
+            vec2 gridXZ = abs(fract(vWorldPos.xz * density - 0.5) - 0.5);
+            float lineXZ = max(
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXZ.x),
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridXZ.y)
+            );
+
+            // YZ 平面投影（侧面）
+            vec2 gridYZ = abs(fract(vWorldPos.yz * density - 0.5) - 0.5);
+            float lineYZ = max(
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridYZ.x),
+              smoothstep(u_lineWidth, u_lineWidth * 0.3, gridYZ.y)
+            );
+
+            // 按法线方向混合三个投影（法线越朝向某轴，该轴的投影权重越大）
+            float line = lineXY * absNormal.z + lineXZ * absNormal.y + lineYZ * absNormal.x;
+            line = clamp(line, 0.0, 1.0);
 
             // 边缘发光（菲涅尔效果）
             vec3 viewDir = normalize(cameraPosition - vWorldPos);
