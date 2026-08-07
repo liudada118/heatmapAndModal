@@ -118,7 +118,7 @@ export default function GlowBody() {
 
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
-        side: THREE.FrontSide,
+        side: THREE.DoubleSide,
         depthWrite: true,
         depthTest: true,
         uniforms: {
@@ -170,6 +170,13 @@ export default function GlowBody() {
       const gridMaterials: THREE.ShaderMaterial[] = [];
       model.traverse((child: any) => {
         if (child.isMesh) {
+          // 过滤掉面数极少的辅助对象（骨骼标记、光点等）
+          const geo = child.geometry as THREE.BufferGeometry;
+          const vertCount = geo.attributes.position ? geo.attributes.position.count : 0;
+          if (vertCount < 100) {
+            child.visible = false;
+            return;
+          }
           const mat = gridShaderMat.clone();
           gridMaterials.push(mat);
           child.material = mat;
