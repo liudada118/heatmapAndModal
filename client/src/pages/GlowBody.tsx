@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -12,6 +12,16 @@ const MODEL_URL = '/manus-storage/human3_4d7d4b1f.glb';
 export default function GlowBody() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [, navigate] = useLocation();
+  const materialsRef = useRef<THREE.ShaderMaterial[]>([]);
+  const [density, setDensity] = useState(80);
+  const [lineWidth, setLineWidth] = useState(0.02);
+
+  const updateShader = useCallback((d: number, lw: number) => {
+    for (const m of materialsRef.current) {
+      m.uniforms.u_gridDensity.value = d;
+      m.uniforms.u_lineWidth.value = lw;
+    }
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -195,6 +205,7 @@ export default function GlowBody() {
 
       // 保存引用，用于动画更新 u_time
       (scene as any).__gridMaterials = gridMaterials;
+      materialsRef.current = gridMaterials;
 
       // 计算模型变换后的包围盒
       const newBox = new THREE.Box3().setFromObject(model);
@@ -254,7 +265,29 @@ export default function GlowBody() {
         <span className="text-yellow-600/50 text-xs">Wireframe + Bloom Post-Processing</span>
       </div>
       {/* 3D Viewport */}
-      <div ref={containerRef} className="flex-1" />
+      <div ref={containerRef} className="flex-1 relative">
+        {/* 滑块控制面板 */}
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/70 backdrop-blur-sm rounded-lg px-5 py-3 flex items-center gap-6 border border-yellow-900/30">
+          <label className="flex items-center gap-2 text-yellow-400/80 text-xs">
+            <span>密度</span>
+            <input
+              type="range" min="20" max="150" step="5" value={density}
+              onChange={(e) => { const v = Number(e.target.value); setDensity(v); updateShader(v, lineWidth); }}
+              className="w-24 accent-yellow-500"
+            />
+            <span className="w-6 text-center">{density}</span>
+          </label>
+          <label className="flex items-center gap-2 text-yellow-400/80 text-xs">
+            <span>线宽</span>
+            <input
+              type="range" min="5" max="60" step="1" value={Math.round(lineWidth * 1000)}
+              onChange={(e) => { const v = Number(e.target.value) / 1000; setLineWidth(v); updateShader(density, v); }}
+              className="w-24 accent-yellow-500"
+            />
+            <span className="w-8 text-center">{(lineWidth * 1000).toFixed(0)}</span>
+          </label>
+        </div>
+      </div>
     </div>
   );
 }
