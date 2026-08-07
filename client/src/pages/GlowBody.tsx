@@ -13,8 +13,8 @@ export default function GlowBody() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [, navigate] = useLocation();
   const materialsRef = useRef<THREE.ShaderMaterial[]>([]);
-  const [density, setDensity] = useState(80);
-  const [lineWidth, setLineWidth] = useState(0.02);
+  const [density, setDensity] = useState(40);
+  const [lineWidth, setLineWidth] = useState(0.012);
 
   const updateShader = useCallback((d: number, lw: number) => {
     for (const m of materialsRef.current) {
@@ -59,9 +59,9 @@ export default function GlowBody() {
     composer.addPass(new RenderPass(scene, camera));
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(W, H),
-      0.6,   // strength — 大幅降低，只让最亮的核心发光
-      0.4,   // radius — 缩小辉光扩散范围
-      0.5    // threshold — 提高阈值，只有亮度>0.5的部分才 bloom
+      0.15,  // strength — 极微弱，只给线条一点点柔和光晕
+      0.2,   // radius
+      0.8    // threshold — 只有最亮的点才 bloom
     );
     composer.addPass(bloomPass);
 
@@ -113,8 +113,8 @@ export default function GlowBody() {
       model.updateMatrixWorld(true);
 
       // UV 网格线 ShaderMaterial — 规则正方形网格
-      const gridDensity = 80.0; // 网格密度（越大线越密）
-      const lineWidth = 0.02;   // 线条宽度
+      const gridDensity = 40.0; // 网格密度
+      const lineWidth = 0.012;  // 线条宽度（细线）
 
       const gridShaderMat = new THREE.ShaderMaterial({
         transparent: true,
@@ -154,25 +154,15 @@ export default function GlowBody() {
             float density = u_gridDensity * 0.5;
             vec2 grid = abs(fract(vWorldPos.xy * density - 0.5) - 0.5);
             float line = max(
-              smoothstep(u_lineWidth, u_lineWidth * 0.2, grid.x),
-              smoothstep(u_lineWidth, u_lineWidth * 0.2, grid.y)
+              smoothstep(u_lineWidth, 0.0, grid.x),
+              smoothstep(u_lineWidth, 0.0, grid.y)
             );
 
-            // 边缘发光（菲涅尔效果）
-            vec3 viewDir = normalize(cameraPosition - vWorldPos);
-            float fresnel = 1.0 - abs(dot(viewDir, vNormal));
-            fresnel = pow(fresnel, 2.0) * 0.4;
-
-            // 线条亮度 + 边缘辉光
-            float brightness = line * 0.85 + fresnel;
-
-            // 微弱脉冲
-            float pulse = 0.9 + sin(u_time * 1.5 + vWorldPos.y * 0.5) * 0.1;
-
-            float alpha = brightness * u_opacity * pulse;
+            // 干净锐利的线条，无菲涅尔，无脉冲
+            float alpha = line * u_opacity;
             if (alpha < 0.01) discard;
 
-            gl_FragColor = vec4(u_color * (1.0 + fresnel * 0.5), alpha);
+            gl_FragColor = vec4(u_color, alpha);
           }
         `,
       });
