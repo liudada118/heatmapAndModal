@@ -37,6 +37,15 @@ const TOOLS = [
     color: "from-green-500/20 to-emerald-500/20",
     border: "border-green-500/30",
   },
+  {
+    title: "能量人体模型",
+    desc: "金色发光线框 + Bloom 辉光后处理，科幻风格人体渲染",
+    icon: "✨",
+    path: "/glow",
+    tags: ["Wireframe", "Bloom", "PostFX"],
+    color: "from-yellow-500/20 to-amber-500/20",
+    border: "border-yellow-500/30",
+  },
 ];
 
 export default function Dashboard() {

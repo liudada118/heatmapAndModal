@@ -1196,7 +1196,6 @@ export default function SensorMapper() {
           const modelSize = box.getSize(new THREE.Vector3());
           const modelCenter = box.getCenter(new THREE.Vector3());
 
-          const raycaster = new THREE.Raycaster();
           const newSensors: any[] = [];
           let hitCount = 0;
           let totalCount = 0;

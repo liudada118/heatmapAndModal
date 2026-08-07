@@ -6,6 +6,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Dashboard from "./pages/Dashboard";
 import Compare from "./pages/Compare";
+import GlowBody from "./pages/GlowBody";
 import SensorMapper from "./pages/SensorMapper";
 
 
@@ -15,6 +16,7 @@ function Router() {
       <Route path={"/"} component={Dashboard} />
       <Route path={"/compare"} component={Compare} />
       <Route path={"/mapper"} component={SensorMapper} />
+      <Route path={"/glow"} component={GlowBody} />
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />
